@@ -1,0 +1,7 @@
+name = "asdf-analytics"
+main = "worker.js"
+compatibility_date = "2026-05-10"
+
+[[analytics_engine_datasets]]
+binding = "ASDF_ANALYTICS"
+dataset = "asdf_events"

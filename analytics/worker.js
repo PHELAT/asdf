@@ -1,4 +1,6 @@
 const ALLOWED_EVENTS = new Set(["install", "update_success", "update_failed"]);
+const MAX_BODY_BYTES = 2048;
+const ANALYTICS_BINDING = "ASDF_ANALYTICS";
 
 function json(status, body) {
   return new Response(JSON.stringify(body), {
@@ -19,10 +21,6 @@ function text(status, body = "") {
   });
 }
 
-function dayKey(date = new Date()) {
-  return date.toISOString().slice(0, 10);
-}
-
 function cleanDimension(value, fallback = "unknown") {
   if (typeof value !== "string") {
     return fallback;
@@ -33,12 +31,16 @@ function cleanDimension(value, fallback = "unknown") {
   return cleaned || fallback;
 }
 
-function cleanVersion(value, pattern, fallback = "unknown") {
+function cleanVersion(value, pattern, maxLength, fallback = "unknown") {
   if (typeof value !== "string") {
     return fallback;
   }
 
   const trimmed = value.trim();
+  if (trimmed.length > maxLength) {
+    return fallback;
+  }
+
   return pattern.test(trimmed) ? trimmed : fallback;
 }
 
@@ -51,38 +53,87 @@ function cleanConflictFallback(value) {
   return value === true ? "true" : "false";
 }
 
-function aggregateKey(payload) {
-  const parts = [
-    "v1",
-    dayKey(),
-    payload.event,
-    cleanVersion(payload.human_version, /^[0-9]+[.][0-9]+[.][0-9]+$/),
-    cleanVersion(payload.update_version, /^[0-9]+$/),
-    cleanInstallName(payload.install_name),
-    cleanDimension(payload.os),
-    cleanDimension(payload.shell),
-    cleanConflictFallback(payload.conflict_fallback),
-  ];
+async function readJsonBody(request) {
+  const contentLength = request.headers.get("content-length");
+  if (contentLength !== null) {
+    if (!/^[0-9]+$/.test(contentLength)) {
+      return { error: json(413, { error: "invalid_payload_size" }) };
+    }
 
-  return parts.join(":");
-}
-
-async function incrementAggregate(env, key) {
-  const store = env.ASDF_ANALYTICS_KV || env.ASDF_ANALYTICS;
-  if (!store) {
-    return;
+    const length = Number.parseInt(contentLength, 10);
+    if (length <= 0 || length > MAX_BODY_BYTES) {
+      return { error: json(413, { error: "invalid_payload_size" }) };
+    }
   }
 
-  const current = Number.parseInt((await store.get(key)) || "0", 10);
-  const next = Number.isFinite(current) && current >= 0 ? current + 1 : 1;
-  await store.put(key, String(next));
+  const body = await request.text();
+  if (new TextEncoder().encode(body).length > MAX_BODY_BYTES) {
+    return { error: json(413, { error: "invalid_payload_size" }) };
+  }
+
+  try {
+    return { payload: JSON.parse(body) };
+  } catch {
+    return { error: json(400, { error: "invalid_json" }) };
+  }
+}
+
+function cleanPayload(payload) {
+  return {
+    event: payload.event,
+    humanVersion: cleanVersion(payload.human_version, /^[0-9]+[.][0-9]+[.][0-9]+$/, 20),
+    updateVersion: cleanVersion(payload.update_version, /^[0-9]+$/, 20),
+    installName: cleanInstallName(payload.install_name),
+    os: cleanDimension(payload.os),
+    shell: cleanDimension(payload.shell),
+    conflictFallback: cleanConflictFallback(payload.conflict_fallback),
+  };
+}
+
+function analyticsIndex(event) {
+  return [
+    event.event,
+    event.humanVersion,
+    event.updateVersion,
+    event.installName,
+    event.conflictFallback,
+  ].join(":");
+}
+
+function writeAnalyticsEvent(env, event) {
+  const analytics = env[ANALYTICS_BINDING];
+  if (!analytics || typeof analytics.writeDataPoint !== "function") {
+    console.error(`missing ${ANALYTICS_BINDING} Analytics Engine binding`);
+    return false;
+  }
+
+  try {
+    analytics.writeDataPoint({
+      blobs: [
+        event.event,
+        event.humanVersion,
+        event.updateVersion,
+        event.installName,
+        event.os,
+        event.shell,
+        event.conflictFallback,
+      ],
+      doubles: [1],
+      indexes: [analyticsIndex(event)],
+    });
+  } catch (error) {
+    console.error("failed to write Analytics Engine data point", error);
+    return false;
+  }
+
+  return true;
 }
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    if (request.method === "OPTIONS") {
+    if (request.method === "OPTIONS" && url.pathname === "/event") {
       return text(204);
     }
 
@@ -90,23 +141,19 @@ export default {
       return text(404);
     }
 
-    const contentLength = Number.parseInt(request.headers.get("content-length") || "0", 10);
-    if (contentLength > 2048) {
-      return json(413, { error: "payload_too_large" });
+    const { payload, error } = await readJsonBody(request);
+    if (error) {
+      return error;
     }
 
-    let payload;
-    try {
-      payload = await request.json();
-    } catch {
-      return json(400, { error: "invalid_json" });
-    }
-
-    if (!payload || typeof payload !== "object" || !ALLOWED_EVENTS.has(payload.event)) {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload) || !ALLOWED_EVENTS.has(payload.event)) {
       return json(400, { error: "unknown_event" });
     }
 
-    await incrementAggregate(env, aggregateKey(payload));
+    if (!writeAnalyticsEvent(env, cleanPayload(payload))) {
+      return json(500, { error: "analytics_not_configured" });
+    }
+
     return text(204);
   },
 };

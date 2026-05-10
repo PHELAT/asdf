@@ -35,6 +35,8 @@ asdf cd
 asdf <workspace> rm
 asdf <workspace> fork <new-workspace>
 asdf list
+asdf --completion bash|zsh
+asdf completion bash|zsh
 asdf help
 ```
 
@@ -66,6 +68,22 @@ asdf my-feature rm                                  # remove the worktree
 asdf my-feature fork my-feature-v2                  # fork the worktree (with uncommitted changes)
 asdf list                                           # list worktrees with summaries
 ```
+
+### Shell completion
+
+`asdf` can generate shell completion for workspace names, agents, and commands. Add the command for your shell to your shell startup file after `asdf` is on `PATH`.
+
+```sh
+# zsh
+eval "$(asdf --completion zsh)"
+
+# bash
+eval "$(asdf --completion bash)"
+```
+
+With completion installed, typing `asdf my-wo<Tab>` completes from existing worktrees such as `my-work-tree`.
+
+The `asdf completion zsh` form is also supported for Oh My Zsh's `asdf` plugin, which expects that command name.
 
 ## Commands
 

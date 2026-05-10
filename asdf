@@ -17,6 +17,8 @@ Usage:
   asdf <workspace> rm
   asdf <workspace> fork <new-workspace>
   asdf list
+  asdf --completion bash|zsh
+  asdf completion bash|zsh
   asdf help
 
 Examples:
@@ -70,6 +72,13 @@ Fork worktree:
                         the selected worktree's current HEAD, including its
                         uncommitted changes.
 
+Shell completion:
+  --completion bash|zsh
+  completion bash|zsh
+                        Print a shell completion script. Add the eval command
+                        for your shell to your shell startup file after asdf is
+                        on PATH.
+
 Worktree kickstart:
   jkl                   After creating a named worktree, run a root-level jkl
                         file with bash from the new worktree root. asdf checks
@@ -113,6 +122,261 @@ is_workspace_command() {
   case "${1:-}" in
     wdid | cd | rm | fork) return 0 ;;
     *) return 1 ;;
+  esac
+}
+
+emit_matching_candidates() {
+  local prefix="$1"
+  shift
+
+  local candidate
+  for candidate in "$@"; do
+    case "$candidate" in
+      "$prefix"*) printf '%s\n' "$candidate" ;;
+    esac
+  done
+}
+
+emit_matching_candidate_lines() {
+  local prefix="$1"
+  local candidate
+
+  while IFS= read -r candidate; do
+    case "$candidate" in
+      "$prefix"*) printf '%s\n' "$candidate" ;;
+    esac
+  done
+}
+
+completion_workspace_candidates() {
+  local current_dir repo_root
+
+  printf 'local\n'
+
+  current_dir="$(pwd -P)"
+  repo_root="$(git -C "$current_dir" rev-parse --show-toplevel 2>/dev/null)" ||
+    return 0
+
+  git -C "$repo_root" worktree list --porcelain 2>/dev/null |
+    awk '
+      function basename(path, parts, count) {
+        count = split(path, parts, "/")
+        return parts[count]
+      }
+
+      function branchname(ref) {
+        sub(/^refs\/heads\//, "", ref)
+        return ref
+      }
+
+      function valid(name) {
+        return name != "" &&
+          name != "local" &&
+          name != "wdid" &&
+          name != "cd" &&
+          name != "rm" &&
+          name != "fork" &&
+          name !~ /^-/ &&
+          name !~ /\// &&
+          name !~ /\.\./ &&
+          name !~ /[[:space:]]/
+      }
+
+      function emit(name) {
+        if (valid(name) && !seen[name]++) {
+          print name
+        }
+      }
+
+      function flush() {
+        if (path == "") {
+          return
+        }
+
+        emit(basename(path))
+        emit(branchname(branch))
+      }
+
+      /^worktree / {
+        flush()
+        path = substr($0, 10)
+        branch = ""
+        next
+      }
+
+      /^branch / {
+        branch = substr($0, 8)
+        next
+      }
+
+      END {
+        flush()
+      }
+    ' || return 0
+}
+
+complete_first_word() {
+  local prefix="$1"
+
+  emit_matching_candidates "$prefix" \
+    codex claude wdid cd fork list ls help --help -h --completion completion
+  completion_workspace_candidates | emit_matching_candidate_lines "$prefix"
+}
+
+complete_workspace_position() {
+  local prefix="$1"
+
+  emit_matching_candidates "$prefix" wdid cd fork --
+  completion_workspace_candidates | emit_matching_candidate_lines "$prefix"
+}
+
+complete_after_workspace() {
+  local prefix="$1"
+
+  emit_matching_candidates "$prefix" wdid cd rm fork --
+}
+
+complete_asdf_words() {
+  local cword="${1:-0}"
+  shift || true
+
+  local -a words
+  words=("$@")
+
+  local cur first second third i
+  cur="${words[$cword]:-}"
+  first="${words[1]:-}"
+  second="${words[2]:-}"
+  third="${words[3]:-}"
+
+  for ((i = 1; i < cword; i++)); do
+    [ "${words[$i]:-}" != "--" ] || return 0
+  done
+
+  if [ "$cword" -le 1 ]; then
+    complete_first_word "$cur"
+    return
+  fi
+
+  case "$first" in
+    --completion | completion)
+      if [ "$cword" -eq 2 ]; then
+        emit_matching_candidates "$cur" bash zsh
+      fi
+      return
+      ;;
+    --help | -h | help | list | ls | cd)
+      return
+      ;;
+    wdid)
+      if [ "$cword" -eq 2 ]; then
+        emit_matching_candidates "$cur" --
+      fi
+      return
+      ;;
+    fork)
+      return
+      ;;
+  esac
+
+  if is_supported_agent "$first"; then
+    case "$cword" in
+      2)
+        complete_workspace_position "$cur"
+        return
+        ;;
+      3)
+        case "$second" in
+          wdid)
+            emit_matching_candidates "$cur" --
+            ;;
+          cd | rm | fork)
+            ;;
+          *)
+            complete_after_workspace "$cur"
+            ;;
+        esac
+        return
+        ;;
+      4)
+        if [ "$third" = "wdid" ]; then
+          emit_matching_candidates "$cur" --
+        fi
+        return
+        ;;
+      *)
+        return
+        ;;
+    esac
+  fi
+
+  case "$cword" in
+    2)
+      complete_after_workspace "$cur"
+      ;;
+    3)
+      if [ "$second" = "wdid" ]; then
+        emit_matching_candidates "$cur" --
+      fi
+      ;;
+  esac
+}
+
+print_completion_script() {
+  local shell="${1:-}"
+
+  [ "$#" -eq 1 ] ||
+    die "usage: asdf --completion bash|zsh"
+
+  case "$shell" in
+    bash)
+      cat <<'EOF'
+_asdf_completion() {
+  local completion
+
+  COMPREPLY=()
+  while IFS= read -r completion; do
+    COMPREPLY+=("$completion")
+  done < <(command asdf --complete "$COMP_CWORD" "${COMP_WORDS[@]}")
+}
+
+complete -o default -o bashdefault -F _asdf_completion asdf
+EOF
+      ;;
+    zsh)
+      cat <<'EOF'
+#compdef asdf
+
+_asdf_completion_body() {
+  local -a completions
+  completions=("${(@f)$(command asdf --complete "$((CURRENT - 1))" "${words[@]}")}")
+
+  if (( ${#completions[@]} )); then
+    compadd -- "${completions[@]}"
+  else
+    _default
+  fi
+}
+
+if [[ "${funcstack[1]:-}" == "_asdf" ]]; then
+  _asdf_completion_body "$@"
+else
+  if ! whence compdef >/dev/null 2>&1; then
+    autoload -Uz compinit
+    compinit
+  fi
+
+  _asdf_completion() {
+    _asdf_completion_body "$@"
+  }
+
+  compdef _asdf_completion asdf
+fi
+EOF
+      ;;
+    *)
+      die "usage: asdf --completion bash|zsh"
+      ;;
   esac
 }
 
@@ -869,6 +1133,24 @@ render_wdid() {
 
   render_markdown_file "$wdid_file" always
 }
+
+case "${1:-}" in
+  --completion)
+    shift
+    print_completion_script "$@"
+    exit 0
+    ;;
+  completion)
+    shift
+    print_completion_script "$@"
+    exit 0
+    ;;
+  --complete)
+    shift
+    complete_asdf_words "$@"
+    exit 0
+    ;;
+esac
 
 command_name="run"
 current_dir="$(pwd -P)"

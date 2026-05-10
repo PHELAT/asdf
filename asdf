@@ -45,6 +45,9 @@ Workspaces:
   <name>                Use an existing worktree named <name>, or create one.
 
 Worktree summaries:
+  list                  Print worktrees. If a worktree has .wdid.md with an
+                        Implementation Summary section, show it below the entry.
+
   wdid                  Print .wdid.md from the selected checkout. If it does
                         not exist, run the selected agent headlessly to create
                         it, then print it.
@@ -424,7 +427,97 @@ existing_workspace_path() {
 }
 
 list_worktrees() {
-  git -C "$REPO_ROOT" worktree list
+  local display_output porcelain_output line i
+  local count=0
+  local path_count=0
+  local -a display_lines paths
+
+  display_output="$(git -C "$REPO_ROOT" worktree list)"
+  porcelain_output="$(git -C "$REPO_ROOT" worktree list --porcelain)"
+
+  while IFS= read -r line; do
+    if [ -z "$line" ]; then
+      continue
+    fi
+
+    display_lines[count]="$line"
+    count=$((count + 1))
+  done <<<"$display_output"
+
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *)
+        paths[path_count]="${line#worktree }"
+        path_count=$((path_count + 1))
+        ;;
+    esac
+  done <<<"$porcelain_output"
+
+  i=0
+  while [ "$i" -lt "$count" ]; do
+    printf '%s\n' "${display_lines[$i]}"
+    if [ "$i" -lt "$path_count" ]; then
+      print_wdid_implementation_summary "${paths[$i]}/.wdid.md"
+    fi
+    i=$((i + 1))
+  done
+}
+
+extract_wdid_implementation_summary() {
+  local wdid_file="$1"
+
+  awk '
+    /^##[[:space:]]+Implementation Summary[[:space:]]*#*[[:space:]]*$/ {
+      in_section = 1
+      saw_heading = 1
+      next
+    }
+
+    in_section && /^#{1,2}[[:space:]]+/ {
+      exit
+    }
+
+    in_section {
+      lines[++count] = $0
+    }
+
+    END {
+      if (!saw_heading) {
+        exit 1
+      }
+
+      start = 1
+      end = count
+
+      while (start <= end && lines[start] ~ /^[[:space:]]*$/) {
+        start++
+      }
+
+      while (end >= start && lines[end] ~ /^[[:space:]]*$/) {
+        end--
+      }
+
+      for (i = start; i <= end; i++) {
+        print lines[i]
+      }
+    }
+  ' "$wdid_file"
+}
+
+print_wdid_implementation_summary() {
+  local wdid_file="$1"
+  local summary
+
+  [ -f "$wdid_file" ] || return 0
+
+  if summary="$(extract_wdid_implementation_summary "$wdid_file")"; then
+    printf '  Implementation Summary:\n'
+    if [ -n "$summary" ]; then
+      printf '%s\n' "$summary" | sed 's/^/    /'
+    else
+      printf '    (empty)\n'
+    fi
+  fi
 }
 
 ensure_forkable_worktree() {

@@ -2,35 +2,35 @@
 
 set -euo pipefail
 
-DEFAULT_WORKSPACE="${AGENT_DEFAULT_WORKSPACE:-local}"
+DEFAULT_WORKSPACE="${ASDF_DEFAULT_WORKSPACE:-local}"
 
 usage() {
   cat <<'EOF'
 Usage:
-  agent [agent] [workspace] [-- agent-args...]
-  agent [workspace] [-- agent-args...]
-  agent [agent] [workspace] wdid [-- agent-args...]
-  agent wdid [-- agent-args...]
-  agent [agent] [workspace] cd
-  agent [workspace] cd
-  agent cd
-  agent list
-  agent help
+  asdf [agent] [workspace] [-- agent-args...]
+  asdf [workspace] [-- agent-args...]
+  asdf [agent] [workspace] wdid [-- agent-args...]
+  asdf wdid [-- agent-args...]
+  asdf [agent] [workspace] cd
+  asdf [workspace] cd
+  asdf cd
+  asdf list
+  asdf help
 
 Examples:
-  agent
-  agent codex
-  agent claude
-  agent codex my-work-space
-  agent codex local
-  agent claude my-work-space -- --dangerously-skip-permissions
-  agent wdid
-  agent codex wdid
-  agent codex my-work-tree wdid
-  agent claude local wdid
-  agent cd
-  agent codex my-work-tree cd
-  agent my-work-tree cd
+  asdf
+  asdf codex
+  asdf claude
+  asdf codex my-work-space
+  asdf codex local
+  asdf claude my-work-space -- --dangerously-skip-permissions
+  asdf wdid
+  asdf codex wdid
+  asdf codex my-work-tree wdid
+  asdf claude local wdid
+  asdf cd
+  asdf codex my-work-tree cd
+  asdf my-work-tree cd
 
 Agents:
   codex
@@ -57,17 +57,17 @@ to the repository's primary checkout at:
   ../<repo-name>-worktrees/<workspace>
 
 Override the worktree container with:
-  AGENT_WORKTREE_DIR=/path/to/worktrees agent codex my-work-space
+  ASDF_WORKTREE_DIR=/path/to/worktrees asdf codex my-work-space
 
 Other environment overrides:
-  AGENT_DEFAULT_AGENT=claude
-    When unset, agent uses codex if installed, otherwise claude.
-  AGENT_DEFAULT_WORKSPACE=my-work-space
+  ASDF_DEFAULT_AGENT=claude
+    When unset, asdf uses codex if installed, otherwise claude.
+  ASDF_DEFAULT_WORKSPACE=my-work-space
 EOF
 }
 
 die() {
-  printf 'agent: %s\n' "$*" >&2
+  printf 'asdf: %s\n' "$*" >&2
   exit 1
 }
 
@@ -86,14 +86,14 @@ is_workspace_command() {
 }
 
 resolve_default_agent() {
-  if [ "${AGENT_DEFAULT_AGENT+x}" = "x" ]; then
-    [ -n "$AGENT_DEFAULT_AGENT" ] ||
-      die "AGENT_DEFAULT_AGENT is set but empty; expected one of: codex, claude"
+  if [ "${ASDF_DEFAULT_AGENT+x}" = "x" ]; then
+    [ -n "$ASDF_DEFAULT_AGENT" ] ||
+      die "ASDF_DEFAULT_AGENT is set but empty; expected one of: codex, claude"
 
-    is_supported_agent "$AGENT_DEFAULT_AGENT" ||
-      die "unsupported default agent '$AGENT_DEFAULT_AGENT'"
+    is_supported_agent "$ASDF_DEFAULT_AGENT" ||
+      die "unsupported default agent '$ASDF_DEFAULT_AGENT'"
 
-    printf '%s\n' "$AGENT_DEFAULT_AGENT"
+    printf '%s\n' "$ASDF_DEFAULT_AGENT"
     return
   fi
 
@@ -107,7 +107,7 @@ resolve_default_agent() {
     return
   fi
 
-  die "could not choose a default agent: neither 'codex' nor 'claude' was found in PATH; install one or set AGENT_DEFAULT_AGENT to codex or claude"
+  die "could not choose a default agent: neither 'codex' nor 'claude' was found in PATH; install one or set ASDF_DEFAULT_AGENT to codex or claude"
 }
 
 parse_agent_args() {
@@ -323,7 +323,7 @@ copy_env_files() {
     count=$((count + 1))
   done < <(find "${find_args[@]}")
 
-  printf 'agent: copied %d .env file(s) into %s\n' "$count" "$target" >&2
+  printf 'asdf: copied %d .env file(s) into %s\n' "$count" "$target" >&2
 }
 
 create_worktree() {
@@ -336,10 +336,10 @@ create_worktree() {
     die "target '$target' already exists but is not registered as a git worktree"
 
   if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$name"; then
-    printf 'agent: creating worktree %s from existing branch %s\n' "$target" "$name" >&2
+    printf 'asdf: creating worktree %s from existing branch %s\n' "$target" "$name" >&2
     git -C "$REPO_ROOT" worktree add "$target" "$name" >&2
   else
-    printf 'agent: creating worktree %s with new branch %s\n' "$target" "$name" >&2
+    printf 'asdf: creating worktree %s with new branch %s\n' "$target" "$name" >&2
     git -C "$REPO_ROOT" worktree add -b "$name" "$target" HEAD >&2
   fi
 
@@ -359,7 +359,7 @@ workspace_path() {
 
   existing="$(find_existing_worktree "$name")"
   if [ -n "$existing" ]; then
-    printf 'agent: using existing worktree %s\n' "$existing" >&2
+    printf 'asdf: using existing worktree %s\n' "$existing" >&2
     printf '%s\n' "$existing"
     return
   fi
@@ -379,7 +379,7 @@ run_agent() {
 
   command -v "$bin" >/dev/null 2>&1 || die "'$bin' command was not found in PATH"
 
-  printf 'agent: opening %s in %s\n' "$bin" "$target" >&2
+  printf 'asdf: opening %s in %s\n' "$bin" "$target" >&2
   cd "$target" || exit 1
   if [ "${#agent_args[@]}" -gt 0 ]; then
     exec "$bin" "${agent_args[@]}"
@@ -396,7 +396,7 @@ enter_workspace() {
     shell_bin="/bin/sh"
   fi
 
-  printf 'agent: entering %s\n' "$target" >&2
+  printf 'asdf: entering %s\n' "$target" >&2
   cd "$target" || exit 1
   exec "$shell_bin"
 }
@@ -449,13 +449,13 @@ EOF
 print_wdid_output_snippet() {
   local output_log="$1"
 
-  printf 'agent: captured output: %s\n' "$output_log" >&2
+  printf 'asdf: captured output: %s\n' "$output_log" >&2
 
   if [ -s "$output_log" ]; then
-    printf 'agent: last 40 lines of captured output:\n' >&2
+    printf 'asdf: last 40 lines of captured output:\n' >&2
     tail -n 40 "$output_log" >&2 || true
   else
-    printf 'agent: captured output was empty\n' >&2
+    printf 'asdf: captured output was empty\n' >&2
   fi
 }
 
@@ -464,13 +464,13 @@ validate_generated_wdid() {
   local output_log="$2"
 
   if [ ! -f "$wdid_file" ]; then
-    printf 'agent: .wdid.md was not created at %s\n' "$wdid_file" >&2
+    printf 'asdf: .wdid.md was not created at %s\n' "$wdid_file" >&2
     print_wdid_output_snippet "$output_log"
     exit 1
   fi
 
   if [ ! -s "$wdid_file" ]; then
-    printf 'agent: .wdid.md was created but is empty at %s\n' "$wdid_file" >&2
+    printf 'asdf: .wdid.md was created but is empty at %s\n' "$wdid_file" >&2
     print_wdid_output_snippet "$output_log"
     exit 1
   fi
@@ -509,23 +509,23 @@ generate_wdid() {
 
   tmp_root="${TMPDIR:-/tmp}"
   tmp_root="${tmp_root%/}"
-  output_log="$(mktemp "$tmp_root/agent-wdid.XXXXXX")" ||
+  output_log="$(mktemp "$tmp_root/asdf-wdid.XXXXXX")" ||
     die "could not create temporary log file"
   prompt="$(wdid_prompt)"
 
-  printf 'agent: generating .wdid.md with %s in %s\n' "$selected_agent" "$target" >&2
+  printf 'asdf: generating .wdid.md with %s in %s\n' "$selected_agent" "$target" >&2
 
   case "$selected_agent" in
     codex)
       if ! run_codex_wdid "$target" "$prompt" >"$output_log" 2>&1; then
-        printf 'agent: codex failed while generating .wdid.md\n' >&2
+        printf 'asdf: codex failed while generating .wdid.md\n' >&2
         print_wdid_output_snippet "$output_log"
         exit 1
       fi
       ;;
     claude)
       if ! run_claude_wdid "$target" "$prompt" >"$output_log" 2>&1; then
-        printf 'agent: claude failed while generating .wdid.md\n' >&2
+        printf 'asdf: claude failed while generating .wdid.md\n' >&2
         print_wdid_output_snippet "$output_log"
         exit 1
       fi
@@ -562,7 +562,7 @@ render_wdid() {
 command_name="run"
 current_dir="$(pwd -P)"
 REPO_ROOT="$(git -C "$current_dir" rev-parse --show-toplevel 2>/dev/null)" ||
-  die "run agent from inside a git repository"
+  die "run asdf from inside a git repository"
 GIT_COMMON_DIR="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ||
   die "could not resolve git common directory for $REPO_ROOT"
 
@@ -574,10 +574,10 @@ esac
 repo_parent="$(dirname "$PRIMARY_REPO_ROOT")"
 repo_name="$(basename "$PRIMARY_REPO_ROOT")"
 
-if [ -n "${AGENT_WORKTREE_DIR:-}" ]; then
-  case "$AGENT_WORKTREE_DIR" in
-    /*) WORKTREE_ROOT="$AGENT_WORKTREE_DIR" ;;
-    *) WORKTREE_ROOT="$REPO_ROOT/$AGENT_WORKTREE_DIR" ;;
+if [ -n "${ASDF_WORKTREE_DIR:-}" ]; then
+  case "$ASDF_WORKTREE_DIR" in
+    /*) WORKTREE_ROOT="$ASDF_WORKTREE_DIR" ;;
+    *) WORKTREE_ROOT="$REPO_ROOT/$ASDF_WORKTREE_DIR" ;;
   esac
 else
   WORKTREE_ROOT="$repo_parent/${repo_name}-worktrees"

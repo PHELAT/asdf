@@ -11,6 +11,9 @@ Usage:
   agent [workspace] [-- agent-args...]
   agent [agent] [workspace] wdid [-- agent-args...]
   agent wdid [-- agent-args...]
+  agent [agent] [workspace] cd
+  agent [workspace] cd
+  agent cd
   agent list
   agent help
 
@@ -25,14 +28,17 @@ Examples:
   agent codex wdid
   agent codex my-work-tree wdid
   agent claude local wdid
+  agent cd
+  agent codex my-work-tree cd
+  agent my-work-tree cd
 
 Agents:
   codex
   claude
 
 Workspaces:
-  local                 Open the agent in the current Git checkout.
-  <name>                Open an existing worktree named <name>, or create one.
+  local                 Use the current Git checkout.
+  <name>                Use an existing worktree named <name>, or create one.
 
 Worktree summaries:
   wdid                  Print .wdid.md from the selected checkout. If it does
@@ -41,6 +47,10 @@ Worktree summaries:
 
   .wdid.md is cached. Once present, wdid prints it without regenerating.
   Delete .wdid.md and run wdid again to regenerate it.
+
+Change directory:
+  cd                    Enter the selected checkout in a new interactive shell.
+                        Exit that shell to return to the previous directory.
 
 Run this from anywhere inside a Git repository. New worktrees are created next
 to the repository's primary checkout at:
@@ -64,6 +74,13 @@ die() {
 is_supported_agent() {
   case "${1:-}" in
     codex | claude) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_workspace_command() {
+  case "${1:-}" in
+    wdid | cd) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -105,6 +122,29 @@ parse_agent_args() {
   agent_args=("$@")
 }
 
+parse_no_args() {
+  [ "$#" -eq 0 ] ||
+    die "'$command_name' does not accept extra arguments"
+}
+
+parse_workspace_command() {
+  command_name="$1"
+  shift
+
+  case "$command_name" in
+    wdid)
+      [ -n "$agent_name" ] || agent_name="$(resolve_default_agent)"
+      parse_agent_args "$@"
+      ;;
+    cd)
+      parse_no_args "$@"
+      ;;
+    *)
+      die "unknown command '$command_name'"
+      ;;
+  esac
+}
+
 parse_args() {
   local saw_agent=0
 
@@ -135,6 +175,13 @@ parse_args() {
       parse_agent_args "$@"
       return
       ;;
+    cd)
+      command_name="cd"
+      workspace_name="local"
+      shift
+      parse_no_args "$@"
+      return
+      ;;
   esac
 
   if is_supported_agent "$1"; then
@@ -142,18 +189,15 @@ parse_args() {
     saw_agent=1
     shift
   else
-    agent_name="$(resolve_default_agent)"
     workspace_name="$1"
     shift
   fi
 
-  if [ "$#" -gt 0 ] && [ "$1" = "wdid" ]; then
-    command_name="wdid"
+  if [ "$#" -gt 0 ] && is_workspace_command "$1"; then
     if [ "$saw_agent" -eq 1 ]; then
       workspace_name="local"
     fi
-    shift
-    parse_agent_args "$@"
+    parse_workspace_command "$@"
     return
   fi
 
@@ -162,17 +206,17 @@ parse_args() {
       workspace_name="$1"
       shift
 
-      if [ "$#" -gt 0 ] && [ "$1" = "wdid" ]; then
-        command_name="wdid"
-        shift
-        parse_agent_args "$@"
+      if [ "$#" -gt 0 ] && is_workspace_command "$1"; then
+        parse_workspace_command "$@"
         return
       fi
     else
+      [ -n "$agent_name" ] || agent_name="$(resolve_default_agent)"
       die "unexpected argument '$1'; use -- before arguments intended for $agent_name"
     fi
   fi
 
+  [ -n "$agent_name" ] || agent_name="$(resolve_default_agent)"
   parse_agent_args "$@"
 }
 
@@ -228,6 +272,7 @@ validate_workspace_name() {
 
   [ -n "$name" ] || die "workspace name cannot be empty"
   [ "$name" != "wdid" ] || die "'wdid' is a reserved command name"
+  [ "$name" != "cd" ] || die "'cd' is a reserved command name"
   [ "$name" != "local" ] || return 0
 
   case "$name" in
@@ -341,6 +386,19 @@ run_agent() {
   else
     exec "$bin"
   fi
+}
+
+enter_workspace() {
+  local target="$1"
+  local shell_bin="${SHELL:-/bin/sh}"
+
+  if ! command -v "$shell_bin" >/dev/null 2>&1; then
+    shell_bin="/bin/sh"
+  fi
+
+  printf 'agent: entering %s\n' "$target" >&2
+  cd "$target" || exit 1
+  exec "$shell_bin"
 }
 
 wdid_prompt() {
@@ -534,6 +592,10 @@ case "$command_name" in
   run)
     target_dir="$(workspace_path "$workspace_name")"
     run_agent "$agent_name" "$target_dir"
+    ;;
+  cd)
+    target_dir="$(workspace_path "$workspace_name")"
+    enter_workspace "$target_dir"
     ;;
   wdid)
     target_dir="$(workspace_path "$workspace_name")"

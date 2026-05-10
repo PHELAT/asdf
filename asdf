@@ -14,6 +14,7 @@ Usage:
   asdf [agent] [workspace] cd
   asdf [workspace] cd
   asdf cd
+  asdf <workspace> rm
   asdf list
   asdf help
 
@@ -31,6 +32,7 @@ Examples:
   asdf cd
   asdf codex my-work-tree cd
   asdf my-work-tree cd
+  asdf my-work-tree rm
 
 Agents:
   codex
@@ -51,6 +53,10 @@ Worktree summaries:
 Change directory:
   cd                    Enter the selected checkout in a new interactive shell.
                         Exit that shell to return to the previous directory.
+
+Remove worktree:
+  rm                    Remove the explicitly selected worktree. This requires
+                        a named worktree, e.g. asdf my-work-tree rm.
 
 Run this from anywhere inside a Git repository. New worktrees are created next
 to the repository's primary checkout at:
@@ -80,7 +86,7 @@ is_supported_agent() {
 
 is_workspace_command() {
   case "${1:-}" in
-    wdid | cd) return 0 ;;
+    wdid | cd | rm) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -139,6 +145,9 @@ parse_workspace_command() {
     cd)
       parse_no_args "$@"
       ;;
+    rm)
+      parse_no_args "$@"
+      ;;
     *)
       die "unknown command '$command_name'"
       ;;
@@ -151,6 +160,7 @@ parse_args() {
   command_name="run"
   agent_name=""
   workspace_name="$DEFAULT_WORKSPACE"
+  workspace_explicit=0
   agent_args=()
 
   if [ "$#" -eq 0 ]; then
@@ -182,6 +192,9 @@ parse_args() {
       parse_no_args "$@"
       return
       ;;
+    rm)
+      die "rm requires an explicit worktree name: asdf <worktree> rm"
+      ;;
   esac
 
   if is_supported_agent "$1"; then
@@ -190,6 +203,7 @@ parse_args() {
     shift
   else
     workspace_name="$1"
+    workspace_explicit=1
     shift
   fi
 
@@ -204,6 +218,7 @@ parse_args() {
   if [ "$#" -gt 0 ] && [ "$1" != "--" ]; then
     if [ "$saw_agent" -eq 1 ]; then
       workspace_name="$1"
+      workspace_explicit=1
       shift
 
       if [ "$#" -gt 0 ] && is_workspace_command "$1"; then
@@ -273,6 +288,7 @@ validate_workspace_name() {
   [ -n "$name" ] || die "workspace name cannot be empty"
   [ "$name" != "wdid" ] || die "'wdid' is a reserved command name"
   [ "$name" != "cd" ] || die "'cd' is a reserved command name"
+  [ "$name" != "rm" ] || die "'rm' is a reserved command name"
   [ "$name" != "local" ] || return 0
 
   case "$name" in
@@ -371,6 +387,29 @@ workspace_path() {
 
 list_worktrees() {
   git -C "$REPO_ROOT" worktree list
+}
+
+remove_worktree() {
+  local name="$1"
+  local existing
+
+  validate_workspace_name "$name"
+
+  [ "$name" != "local" ] ||
+    die "refusing to remove the local checkout; provide a named worktree"
+
+  existing="$(find_existing_worktree "$name")"
+  [ -n "$existing" ] ||
+    die "worktree '$name' was not found"
+
+  [ "$existing" != "$PRIMARY_REPO_ROOT" ] ||
+    die "refusing to remove the primary checkout; provide a named worktree"
+
+  [ "$existing" != "$REPO_ROOT" ] ||
+    die "refusing to remove the current checkout; run this from another checkout"
+
+  printf 'asdf: removing worktree %s\n' "$existing" >&2
+  git -C "$REPO_ROOT" worktree remove "$existing"
 }
 
 run_agent() {
@@ -596,6 +635,11 @@ case "$command_name" in
   cd)
     target_dir="$(workspace_path "$workspace_name")"
     enter_workspace "$target_dir"
+    ;;
+  rm)
+    [ "$workspace_explicit" -eq 1 ] ||
+      die "rm requires an explicit worktree name: asdf <worktree> rm"
+    remove_worktree "$workspace_name"
     ;;
   wdid)
     target_dir="$(workspace_path "$workspace_name")"

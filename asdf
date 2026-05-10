@@ -47,6 +47,8 @@ Workspaces:
 Worktree summaries:
   list                  Print worktrees. If a worktree has .wdid.md with an
                         Implementation Summary section, show it below the entry.
+                        When stdout is a terminal, render the output as markdown
+                        with glow, mdcat, or bat when available.
 
   wdid                  Print .wdid.md from the selected checkout. If it does
                         not exist, run the selected agent headlessly to create
@@ -435,7 +437,7 @@ existing_workspace_path() {
 }
 
 list_worktrees() {
-  local display_output porcelain_output line i
+  local display_output porcelain_output line i list_markdown tmp_root
   local count=0
   local path_count=0
   local -a display_lines paths
@@ -460,6 +462,31 @@ list_worktrees() {
         ;;
     esac
   done <<<"$porcelain_output"
+
+  if [ -t 1 ] && has_markdown_renderer; then
+    tmp_root="${TMPDIR:-/tmp}"
+    tmp_root="${tmp_root%/}"
+    list_markdown="$(mktemp "$tmp_root/asdf-list.XXXXXX.md")" ||
+      die "could not create temporary list file"
+
+    i=0
+    while [ "$i" -lt "$count" ]; do
+      printf '%s\n' "${display_lines[$i]}"
+      if [ "$i" -lt "$path_count" ]; then
+        print_wdid_implementation_summary_markdown "${paths[$i]}/.wdid.md"
+      fi
+      printf '\n'
+      i=$((i + 1))
+    done >"$list_markdown"
+
+    if ! render_markdown_file "$list_markdown" never; then
+      rm -f "$list_markdown"
+      return 1
+    fi
+
+    rm -f "$list_markdown"
+    return
+  fi
 
   i=0
   while [ "$i" -lt "$count" ]; do
@@ -526,6 +553,28 @@ print_wdid_implementation_summary() {
       printf '    (empty)\n'
     fi
   fi
+}
+
+print_wdid_implementation_summary_markdown() {
+  local wdid_file="$1"
+  local summary
+
+  [ -f "$wdid_file" ] || return 0
+
+  if summary="$(extract_wdid_implementation_summary "$wdid_file")"; then
+    printf '\n**Implementation Summary**\n\n'
+    if [ -n "$summary" ]; then
+      printf '%s\n' "$summary"
+    else
+      printf '_(empty)_\n'
+    fi
+  fi
+}
+
+has_markdown_renderer() {
+  command -v glow >/dev/null 2>&1 ||
+    command -v mdcat >/dev/null 2>&1 ||
+    command -v bat >/dev/null 2>&1
 }
 
 ensure_forkable_worktree() {
@@ -789,25 +838,36 @@ generate_wdid() {
   validate_generated_wdid "$wdid_file" "$output_log"
 }
 
-render_wdid() {
-  local wdid_file="$1"
+render_markdown_file() {
+  local markdown_file="$1"
+  local paging="${2:-always}"
 
   if [ ! -t 1 ]; then
-    cat "$wdid_file"
+    cat "$markdown_file"
     return
   fi
 
   if command -v glow >/dev/null 2>&1; then
-    glow -p "$wdid_file"
+    if [ "$paging" = "always" ]; then
+      glow -p "$markdown_file"
+    else
+      glow "$markdown_file"
+    fi
   elif command -v mdcat >/dev/null 2>&1; then
-    mdcat "$wdid_file"
+    mdcat "$markdown_file"
   elif command -v bat >/dev/null 2>&1; then
-    bat --language markdown --style=plain --paging=always "$wdid_file"
-  elif command -v less >/dev/null 2>&1; then
-    less -R "$wdid_file"
+    bat --language markdown --style=plain --paging="$paging" "$markdown_file"
+  elif [ "$paging" = "always" ] && command -v less >/dev/null 2>&1; then
+    less -R "$markdown_file"
   else
-    cat "$wdid_file"
+    cat "$markdown_file"
   fi
+}
+
+render_wdid() {
+  local wdid_file="$1"
+
+  render_markdown_file "$wdid_file" always
 }
 
 command_name="run"

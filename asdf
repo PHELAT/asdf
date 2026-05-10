@@ -68,6 +68,13 @@ Fork worktree:
                         the selected worktree's current HEAD, including its
                         uncommitted changes.
 
+Worktree kickstart:
+  jkl                   After creating a named worktree, run a root-level jkl
+                        file with bash from the new worktree root. asdf checks
+                        the new worktree first, then the source checkout. When
+                        forking, this runs after uncommitted changes are
+                        copied from the source worktree.
+
 Run this from anywhere inside a Git repository. New worktrees are created next
 to the repository's primary checkout at:
   ../<repo-name>-worktrees/<workspace>
@@ -79,6 +86,12 @@ Other environment overrides:
   ASDF_DEFAULT_AGENT=claude
     When unset, asdf uses codex if installed, otherwise claude.
   ASDF_DEFAULT_WORKSPACE=my-work-space
+
+jkl receives:
+  ASDF_JKL_FILE         Path to the jkl file being run.
+  ASDF_JKL_SOURCE_DIR   Checkout/worktree used as the source.
+  ASDF_JKL_TARGET_DIR   Newly created worktree being set up.
+  ASDF_JKL_WORKSPACE    New worktree name.
 EOF
 }
 
@@ -326,43 +339,38 @@ validate_workspace_name() {
     die "workspace '$name' is not a valid git branch name"
 }
 
-copy_env_files() {
+run_jkl() {
   local source="$1"
   local target="$2"
-  local count=0
-  local env_file rel_path dest_path dest_dir
-  local -a find_args prune_args
+  local workspace="$3"
+  local target_jkl="$target/jkl"
+  local source_jkl="$source/jkl"
+  local jkl_file=""
 
-  prune_args=(
-    -name ".git"
-    -o -name "node_modules"
-    -o -name ".next"
-    -o -name ".turbo"
-    -o -name ".vercel"
-    -o -name ".expo"
-    -o -name "dist"
-    -o -name "build"
-  )
+  if [ -e "$target_jkl" ]; then
+    [ -f "$target_jkl" ] ||
+      die "$target_jkl exists but is not a regular file"
+    jkl_file="$target_jkl"
+  elif [ "$source" != "$target" ] && [ -e "$source_jkl" ]; then
+    [ -f "$source_jkl" ] ||
+      die "$source_jkl exists but is not a regular file"
+    jkl_file="$source_jkl"
+  else
+    return 0
+  fi
 
-  case "$WORKTREE_ROOT" in
-    "$source"/*)
-      prune_args+=(-o -path "$WORKTREE_ROOT")
-      ;;
-  esac
+  printf 'asdf: running jkl %s in %s\n' "$jkl_file" "$target" >&2
 
-  find_args=("$source" "(" -type d "(" "${prune_args[@]}" ")" ")" -prune -o -type f -name ".env*" -print0)
-
-  while IFS= read -r -d '' env_file; do
-    rel_path="${env_file#"$source"/}"
-    dest_path="$target/$rel_path"
-    dest_dir="$(dirname "$dest_path")"
-
-    mkdir -p "$dest_dir"
-    cp -p "$env_file" "$dest_path"
-    count=$((count + 1))
-  done < <(find "${find_args[@]}")
-
-  printf 'asdf: copied %d .env file(s) into %s\n' "$count" "$target" >&2
+  if ! (
+    cd "$target" || exit 1
+    ASDF_JKL_FILE="$jkl_file" \
+      ASDF_JKL_SOURCE_DIR="$source" \
+      ASDF_JKL_TARGET_DIR="$target" \
+      ASDF_JKL_WORKSPACE="$workspace" \
+      bash "$jkl_file" >&2
+  ); then
+    die "jkl failed for worktree '$workspace'"
+  fi
 }
 
 create_worktree() {
@@ -382,7 +390,7 @@ create_worktree() {
     git -C "$REPO_ROOT" worktree add -b "$name" "$target" HEAD >&2
   fi
 
-  copy_env_files "$REPO_ROOT" "$target"
+  run_jkl "$REPO_ROOT" "$target" "$name"
 }
 
 workspace_path() {
@@ -590,7 +598,7 @@ fork_worktree() {
   printf 'asdf: forking worktree %s into %s with new branch %s\n' "$source" "$target" "$target_name" >&2
   git -C "$REPO_ROOT" worktree add -b "$target_name" "$target" "$source_head" >&2
   copy_uncommitted_changes "$source" "$target"
-  copy_env_files "$source" "$target"
+  run_jkl "$source" "$target" "$target_name"
 }
 
 remove_worktree() {

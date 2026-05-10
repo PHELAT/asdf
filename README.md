@@ -77,7 +77,7 @@ asdf cd                                             # shell into local
 asdf my-feature cd                                  # shell into the worktree
 asdf my-feature rm                                  # remove the worktree
 asdf my-feature fork my-feature-v2                  # fork the worktree (with uncommitted changes)
-asdf list                                           # list worktrees with summaries
+asdf list                                           # list newest worktrees with creation dates and summaries
 asdf --version                                      # print asdf 1.0.0
 asdf update                                         # update the installed asdf executable
 ```
@@ -128,7 +128,7 @@ Creates `<new-workspace>` as a new branch and worktree starting from the selecte
 
 ### `list` / `ls`
 
-Lists git worktrees. If a worktree's `.wdid.md` has an `## Implementation Summary` section, that section is shown indented beneath the entry.
+Lists git worktrees newest first, showing each worktree's creation date. If a worktree's `.wdid.md` has an `## Implementation Summary` section, that section is shown indented beneath the entry.
 
 When standard output is a terminal, the list output is rendered as Markdown with `glow`, `mdcat`, or `bat` (whichever is found first), falling back to plain text. Piped output stays plain for scripts.
 

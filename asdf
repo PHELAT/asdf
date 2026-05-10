@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ASDF_HUMAN_VERSION="1.0.0"
-ASDF_UPDATE_VERSION="2026051000"
+ASDF_UPDATE_VERSION="2026051001"
 ASDF_REMOTE_BASE_URL_OVERRIDE="${ASDF_REMOTE_BASE_URL:-}"
 ASDF_REMOTE_BASE_URL="https://raw.githubusercontent.com/PHELAT/asdf/main"
 ASDF_REMOTE_BASE_URL="${ASDF_REMOTE_BASE_URL_OVERRIDE:-$ASDF_REMOTE_BASE_URL}"
@@ -61,8 +61,9 @@ Workspaces:
   <name>                Use an existing worktree named <name>, or create one.
 
 Worktree summaries:
-  list                  Print worktrees. If a worktree has .wdid.md with an
-                        Implementation Summary section, show it below the entry.
+  list                  Print worktrees newest first with their creation date.
+                        If a worktree has .wdid.md with an Implementation
+                        Summary section, show it below the entry.
                         When stdout is a terminal, render the output as markdown
                         with glow, mdcat, or bat when available.
 
@@ -1015,8 +1016,108 @@ existing_workspace_path() {
   printf '%s\n' "$existing"
 }
 
+reflog_first_timestamp() {
+  local reflog_file="$1"
+
+  [ -f "$reflog_file" ] || return 1
+
+  awk '
+    BEGIN { FS = "\t" }
+
+    {
+      field_count = split($1, fields, " ")
+      if (field_count >= 2 && fields[field_count - 1] ~ /^[0-9]+$/) {
+        print fields[field_count - 1]
+        found = 1
+      }
+      exit
+    }
+
+    END {
+      if (!found) {
+        exit 1
+      }
+    }
+  ' "$reflog_file"
+}
+
+stat_timestamp() {
+  local path="$1"
+  local timestamp
+
+  if timestamp="$(stat -f %B "$path" 2>/dev/null)" &&
+    is_valid_update_version "$timestamp" &&
+    [ "$timestamp" -gt 0 ]; then
+    printf '%s\n' "$timestamp"
+    return 0
+  fi
+
+  if timestamp="$(stat -c %W "$path" 2>/dev/null)" &&
+    is_valid_update_version "$timestamp" &&
+    [ "$timestamp" -gt 0 ]; then
+    printf '%s\n' "$timestamp"
+    return 0
+  fi
+
+  if timestamp="$(stat -f %m "$path" 2>/dev/null)" &&
+    is_valid_update_version "$timestamp" &&
+    [ "$timestamp" -gt 0 ]; then
+    printf '%s\n' "$timestamp"
+    return 0
+  fi
+
+  if timestamp="$(stat -c %Y "$path" 2>/dev/null)" &&
+    is_valid_update_version "$timestamp" &&
+    [ "$timestamp" -gt 0 ]; then
+    printf '%s\n' "$timestamp"
+    return 0
+  fi
+
+  return 1
+}
+
+worktree_created_timestamp() {
+  local path="$1"
+  local git_dir timestamp
+
+  if git_dir="$(git -C "$path" rev-parse --path-format=absolute --git-dir 2>/dev/null)" &&
+    [ -n "$git_dir" ]; then
+    if timestamp="$(reflog_first_timestamp "$git_dir/logs/HEAD" 2>/dev/null)" &&
+      is_valid_update_version "$timestamp"; then
+      printf '%s\n' "$timestamp"
+      return 0
+    fi
+
+    if timestamp="$(stat_timestamp "$git_dir")"; then
+      printf '%s\n' "$timestamp"
+      return 0
+    fi
+  fi
+
+  if timestamp="$(stat_timestamp "$path")"; then
+    printf '%s\n' "$timestamp"
+    return 0
+  fi
+
+  printf '0\n'
+}
+
+format_worktree_timestamp() {
+  local timestamp="$1"
+
+  if ! is_valid_update_version "$timestamp" || [ "$timestamp" -le 0 ]; then
+    printf 'unknown\n'
+    return
+  fi
+
+  date -r "$timestamp" '+%Y-%m-%d %H:%M:%S %z' 2>/dev/null ||
+    date -d "@$timestamp" '+%Y-%m-%d %H:%M:%S %z' 2>/dev/null ||
+    printf '%s\n' "$timestamp"
+}
+
 list_worktrees() {
-  local display_output porcelain_output line i list_markdown tmp_root
+  local display_output porcelain_output sorted_records line i list_markdown tmp_root
+  local timestamp created_at path display_line record_index
   local count=0
   local path_count=0
   local -a display_lines paths
@@ -1042,6 +1143,38 @@ list_worktrees() {
     esac
   done <<<"$porcelain_output"
 
+  sorted_records="$(
+    i=0
+    while [ "$i" -lt "$count" ]; do
+      path=""
+      timestamp="0"
+      created_at="unknown"
+
+      if [ "$i" -lt "$path_count" ]; then
+        path="${paths[$i]}"
+      fi
+
+      if [ -n "$path" ]; then
+        timestamp="$(worktree_created_timestamp "$path")"
+        created_at="$(format_worktree_timestamp "$timestamp")"
+      fi
+
+      printf '%s\t%s\t%s\t%s\t%s\n' "$timestamp" "$i" "$created_at" "$path" "${display_lines[$i]}"
+      i=$((i + 1))
+    done | sort -t $'\t' -k1,1nr -k2,2n
+  )"
+
+  count=0
+  path_count=0
+  while IFS=$'\t' read -r timestamp record_index created_at path display_line; do
+    [ -n "$timestamp$record_index$created_at$path$display_line" ] || continue
+
+    display_lines[count]="${display_line}  created: ${created_at}"
+    paths[path_count]="$path"
+    count=$((count + 1))
+    path_count=$((path_count + 1))
+  done <<<"$sorted_records"
+
   if [ -t 1 ] && has_markdown_renderer; then
     tmp_root="${TMPDIR:-/tmp}"
     tmp_root="${tmp_root%/}"
@@ -1051,7 +1184,7 @@ list_worktrees() {
     i=0
     while [ "$i" -lt "$count" ]; do
       printf '%s\n' "${display_lines[$i]}"
-      if [ "$i" -lt "$path_count" ]; then
+      if [ "$i" -lt "$path_count" ] && [ -n "${paths[$i]}" ]; then
         print_wdid_implementation_summary_markdown "${paths[$i]}/.wdid.md"
       fi
       printf '\n'
@@ -1070,7 +1203,7 @@ list_worktrees() {
   i=0
   while [ "$i" -lt "$count" ]; do
     printf '%s\n' "${display_lines[$i]}"
-    if [ "$i" -lt "$path_count" ]; then
+    if [ "$i" -lt "$path_count" ] && [ -n "${paths[$i]}" ]; then
       print_wdid_implementation_summary "${paths[$i]}/.wdid.md"
     fi
     i=$((i + 1))

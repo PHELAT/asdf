@@ -2,6 +2,15 @@
 
 set -euo pipefail
 
+ASDF_HUMAN_VERSION="1.0.0"
+ASDF_UPDATE_VERSION="2026051000"
+ASDF_REMOTE_BASE_URL_OVERRIDE="${ASDF_REMOTE_BASE_URL:-}"
+ASDF_REMOTE_BASE_URL="https://raw.githubusercontent.com/PHELAT/asdf/main"
+ASDF_REMOTE_BASE_URL="${ASDF_REMOTE_BASE_URL_OVERRIDE:-$ASDF_REMOTE_BASE_URL}"
+ASDF_ANALYTICS_URL_OVERRIDE="${ASDF_ANALYTICS_URL:-}"
+ASDF_ANALYTICS_URL="https://asdf-analytics.phelat.workers.dev/event"
+ASDF_ANALYTICS_URL="${ASDF_ANALYTICS_URL_OVERRIDE:-$ASDF_ANALYTICS_URL}"
+
 DEFAULT_WORKSPACE="${ASDF_DEFAULT_WORKSPACE:-local}"
 
 usage() {
@@ -17,6 +26,9 @@ Usage:
   asdf <workspace> rm
   asdf <workspace> fork <new-workspace>
   asdf list
+  asdf update
+  asdf version
+  asdf --version
   asdf --completion bash|zsh
   asdf completion bash|zsh
   asdf help
@@ -37,6 +49,8 @@ Examples:
   asdf my-work-tree cd
   asdf my-work-tree rm
   asdf my-work-tree fork my-forked-work-tree
+  asdf update
+  asdf --version
 
 Agents:
   codex
@@ -51,6 +65,14 @@ Worktree summaries:
                         Implementation Summary section, show it below the entry.
                         When stdout is a terminal, render the output as markdown
                         with glow, mdcat, or bat when available.
+
+Version and updates:
+  version, --version    Print the installed asdf version.
+
+  update                Check the latest published update build and replace the
+                        current asdf executable when a newer build is available.
+                        Disable automatic update warnings with
+                        ASDF_UPDATE_CHECK=0.
 
   wdid                  Print .wdid.md from the selected checkout. If it does
                         not exist, run the selected agent headlessly to create
@@ -109,6 +131,292 @@ EOF
 die() {
   printf 'asdf: %s\n' "$*" >&2
   exit 1
+}
+
+print_version() {
+  printf 'asdf %s\n' "$ASDF_HUMAN_VERSION"
+}
+
+current_executable_path() {
+  local source_path source_dir source_base
+
+  source_path="${BASH_SOURCE[0]:-$0}"
+  case "$source_path" in
+    */*) ;;
+    *)
+      source_path="$(command -v "$source_path" 2>/dev/null || true)"
+      if [ -z "$source_path" ]; then
+        source_path="$(command -v "$0" 2>/dev/null || true)"
+      fi
+      ;;
+  esac
+
+  [ -n "$source_path" ] || return 1
+
+  case "$source_path" in
+    /*)
+      printf '%s\n' "$source_path"
+      ;;
+    *)
+      source_dir="$(dirname "$source_path")" || return 1
+      source_base="$(basename "$source_path")" || return 1
+      (cd "$source_dir" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$source_base")
+      ;;
+  esac
+}
+
+is_valid_update_version() {
+  case "${1:-}" in
+    "" | *[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+normalize_update_version() {
+  local version="$1"
+
+  while [ "${version#0}" != "$version" ]; do
+    version="${version#0}"
+  done
+
+  [ -n "$version" ] || version="0"
+  printf '%s\n' "$version"
+}
+
+update_version_gt() {
+  local left right
+
+  is_valid_update_version "$1" || return 1
+  is_valid_update_version "$2" || return 1
+
+  left="$(normalize_update_version "$1")"
+  right="$(normalize_update_version "$2")"
+
+  if [ "${#left}" -gt "${#right}" ]; then
+    return 0
+  fi
+
+  if [ "${#left}" -lt "${#right}" ]; then
+    return 1
+  fi
+
+  [[ "$left" > "$right" ]]
+}
+
+fetch_remote_update_version() {
+  local raw version url
+
+  url="$ASDF_REMOTE_BASE_URL/version.txt"
+  if [ "${1:-}" = "quick" ]; then
+    raw="$(curl -fsSL --max-time 2 "$url" 2>/dev/null)" || return 1
+  else
+    raw="$(curl -fsSL "$url" 2>/dev/null)" || return 1
+  fi
+
+  version="${raw%%$'\n'*}"
+  version="${version%$'\r'}"
+  printf '%s\n' "$version"
+}
+
+file_mode() {
+  stat -f '%Lp' "$1" 2>/dev/null ||
+    stat -c '%a' "$1" 2>/dev/null ||
+    printf '755\n'
+}
+
+json_string() {
+  local value="$1"
+
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '"%s"' "$value"
+}
+
+send_analytics_event() {
+  local event="${1:-}"
+  local install_name="${2:-}"
+  local conflict_fallback="${3:-false}"
+  local current_path os_name shell_name timestamp payload
+
+  [ "${ASDF_ANALYTICS:-1}" != "0" ] || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+
+  case "$event" in
+    install | update_success | update_failed) ;;
+    *) return 0 ;;
+  esac
+
+  if [ -z "$install_name" ]; then
+    current_path="$(current_executable_path 2>/dev/null || true)"
+    if [ -n "$current_path" ]; then
+      install_name="$(basename "$current_path")"
+    else
+      install_name="$(basename "$0")"
+    fi
+  fi
+
+  case "$conflict_fallback" in
+    true | 1 | yes) conflict_fallback="true" ;;
+    *) conflict_fallback="false" ;;
+  esac
+
+  os_name="$(uname -s 2>/dev/null || printf 'unknown')"
+  shell_name="$(basename "${SHELL:-unknown}")"
+  timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf 'unknown')"
+
+  payload="$(printf '{"event":%s,"human_version":%s,"update_version":%s,"install_name":%s,"os":%s,"shell":%s,"conflict_fallback":%s,"timestamp":%s}' \
+    "$(json_string "$event")" \
+    "$(json_string "$ASDF_HUMAN_VERSION")" \
+    "$(json_string "$ASDF_UPDATE_VERSION")" \
+    "$(json_string "$install_name")" \
+    "$(json_string "$os_name")" \
+    "$(json_string "$shell_name")" \
+    "$conflict_fallback" \
+    "$(json_string "$timestamp")")"
+
+  curl -fsS --max-time 2 \
+    -H 'content-type: application/json' \
+    -X POST \
+    --data "$payload" \
+    "$ASDF_ANALYTICS_URL" >/dev/null 2>&1 || true
+}
+
+analytics_conflict_fallback_for_name() {
+  if [ "${1:-}" = "asdff" ]; then
+    printf 'true\n'
+  else
+    printf 'false\n'
+  fi
+}
+
+update_failure() {
+  local install_name="$1"
+  local message="$2"
+  local conflict_fallback
+
+  conflict_fallback="$(analytics_conflict_fallback_for_name "$install_name")"
+  send_analytics_event "update_failed" "$install_name" "$conflict_fallback"
+  die "$message"
+}
+
+asdf_update() {
+  local install_path install_name install_dir conflict_fallback
+  local remote_version tmp_file mode
+
+  [ "$#" -eq 0 ] || die "update does not accept extra arguments"
+
+  install_path="$(current_executable_path)" ||
+    update_failure "asdf" "could not resolve current executable path"
+  install_name="$(basename "$install_path")"
+  conflict_fallback="$(analytics_conflict_fallback_for_name "$install_name")"
+
+  command -v curl >/dev/null 2>&1 ||
+    update_failure "$install_name" "curl is required to update asdf"
+  command -v bash >/dev/null 2>&1 ||
+    update_failure "$install_name" "bash is required to validate updates"
+
+  if ! remote_version="$(fetch_remote_update_version)"; then
+    update_failure "$install_name" "could not fetch update version from $ASDF_REMOTE_BASE_URL/version.txt"
+  fi
+
+  if ! is_valid_update_version "$remote_version"; then
+    update_failure "$install_name" "invalid remote update version '$remote_version'"
+  fi
+
+  if ! update_version_gt "$remote_version" "$ASDF_UPDATE_VERSION"; then
+    send_analytics_event "update_success" "$install_name" "$conflict_fallback"
+    printf 'asdf: already up to date (asdf %s, update %s)\n' "$ASDF_HUMAN_VERSION" "$ASDF_UPDATE_VERSION"
+    return 0
+  fi
+
+  [ -f "$install_path" ] ||
+    update_failure "$install_name" "current executable path is not a file: $install_path"
+
+  install_dir="$(dirname "$install_path")"
+  if [ ! -w "$install_path" ] || [ ! -w "$install_dir" ]; then
+    update_failure "$install_name" "install path is not writable: $install_path"
+  fi
+
+  tmp_file="$(mktemp "$install_dir/.asdf-update.XXXXXX")" ||
+    update_failure "$install_name" "could not create a temporary update file in $install_dir"
+
+  if ! curl -fsSL "$ASDF_REMOTE_BASE_URL/asdf" -o "$tmp_file" 2>/dev/null; then
+    rm -f "$tmp_file"
+    update_failure "$install_name" "could not download updated asdf from $ASDF_REMOTE_BASE_URL/asdf"
+  fi
+
+  if ! bash -n "$tmp_file" >/dev/null 2>&1; then
+    rm -f "$tmp_file"
+    update_failure "$install_name" "downloaded update is not a valid bash script"
+  fi
+
+  mode="$(file_mode "$install_path")"
+  if ! chmod "$mode" "$tmp_file" >/dev/null 2>&1; then
+    rm -f "$tmp_file"
+    update_failure "$install_name" "could not preserve executable permissions for $install_path"
+  fi
+
+  if ! mv -f "$tmp_file" "$install_path"; then
+    rm -f "$tmp_file"
+    update_failure "$install_name" "could not replace $install_path"
+  fi
+
+  send_analytics_event "update_success" "$install_name" "$conflict_fallback"
+  printf 'asdf: updated %s from update %s to %s\n' "$install_path" "$ASDF_UPDATE_VERSION" "$remote_version"
+}
+
+maybe_warn_update_available() {
+  local cache_base cache_dir cache_file now last age remote_version
+
+  [ "${ASDF_UPDATE_CHECK:-1}" != "0" ] || return 0
+  [ -t 2 ] || return 0
+
+  case "${1:-}" in
+    --complete | --completion | completion | --version | version | update)
+      return 0
+      ;;
+  esac
+
+  command -v curl >/dev/null 2>&1 || return 0
+
+  if [ -n "${XDG_CACHE_HOME:-}" ]; then
+    cache_base="$XDG_CACHE_HOME"
+  elif [ -n "${HOME:-}" ]; then
+    cache_base="$HOME/.cache"
+  else
+    return 0
+  fi
+
+  now="$(date +%s 2>/dev/null)" || return 0
+  is_valid_update_version "$now" || return 0
+
+  cache_dir="$cache_base/asdf"
+  cache_file="$cache_dir/last_update_check"
+  last="0"
+
+  if [ -r "$cache_file" ]; then
+    IFS= read -r last <"$cache_file" || last="0"
+  fi
+
+  if is_valid_update_version "$last" && [ "$last" -gt 0 ]; then
+    age=$((now - last))
+    if [ "$age" -ge 0 ] && [ "$age" -lt 86400 ]; then
+      return 0
+    fi
+  fi
+
+  mkdir -p "$cache_dir" >/dev/null 2>&1 || return 0
+  printf '%s\n' "$now" >"$cache_file" 2>/dev/null || return 0
+
+  remote_version="$(fetch_remote_update_version quick || true)"
+  is_valid_update_version "$remote_version" || return 0
+
+  if update_version_gt "$remote_version" "$ASDF_UPDATE_VERSION"; then
+    printf "asdf: update available; run 'asdf update'\n" >&2
+  fi
 }
 
 is_supported_agent() {
@@ -176,6 +484,8 @@ completion_workspace_candidates() {
           name != "cd" &&
           name != "rm" &&
           name != "fork" &&
+          name != "update" &&
+          name != "version" &&
           name !~ /^-/ &&
           name !~ /\// &&
           name !~ /\.\./ &&
@@ -219,7 +529,7 @@ complete_first_word() {
   local prefix="$1"
 
   emit_matching_candidates "$prefix" \
-    codex claude wdid cd fork list ls help --help -h --completion completion
+    codex claude wdid cd fork list ls update version help --help -h --version --completion completion
   completion_workspace_candidates | emit_matching_candidate_lines "$prefix"
 }
 
@@ -265,7 +575,7 @@ complete_asdf_words() {
       fi
       return
       ;;
-    --help | -h | help | list | ls | cd)
+    --help | -h | help | list | ls | cd | update | version | --version)
       return
       ;;
     wdid)
@@ -324,42 +634,45 @@ complete_asdf_words() {
 
 print_completion_script() {
   local shell="${1:-}"
+  local completion_command_name
 
   [ "$#" -eq 1 ] ||
     die "usage: asdf --completion bash|zsh"
 
+  completion_command_name="$(basename "$0")"
+
   case "$shell" in
     bash)
-      cat <<'EOF'
+      cat <<EOF
 _asdf_completion() {
   local completion
 
   COMPREPLY=()
   while IFS= read -r completion; do
-    COMPREPLY+=("$completion")
-  done < <(command asdf --complete "$COMP_CWORD" "${COMP_WORDS[@]}")
+    COMPREPLY+=("\$completion")
+  done < <(command "$completion_command_name" --complete "\$COMP_CWORD" "\${COMP_WORDS[@]}")
 }
 
-complete -o default -o bashdefault -F _asdf_completion asdf
+complete -o default -o bashdefault -F _asdf_completion "$completion_command_name"
 EOF
       ;;
     zsh)
-      cat <<'EOF'
-#compdef asdf
+      cat <<EOF
+#compdef $completion_command_name
 
 _asdf_completion_body() {
   local -a completions
-  completions=("${(@f)$(command asdf --complete "$((CURRENT - 1))" "${words[@]}")}")
+  completions=("\${(@f)\$(command "$completion_command_name" --complete "\$((CURRENT - 1))" "\${words[@]}")}")
 
-  if (( ${#completions[@]} )); then
-    compadd -- "${completions[@]}"
+  if (( \${#completions[@]} )); then
+    compadd -- "\${completions[@]}"
   else
     _default
   fi
 }
 
-if [[ "${funcstack[1]:-}" == "_asdf" ]]; then
-  _asdf_completion_body "$@"
+if [[ "\${funcstack[1]:-}" == "_asdf" ]]; then
+  _asdf_completion_body "\$@"
 else
   if ! whence compdef >/dev/null 2>&1; then
     autoload -Uz compinit
@@ -367,10 +680,10 @@ else
   fi
 
   _asdf_completion() {
-    _asdf_completion_body "$@"
+    _asdf_completion_body "\$@"
   }
 
-  compdef _asdf_completion asdf
+  compdef _asdf_completion "$completion_command_name"
 fi
 EOF
       ;;
@@ -590,6 +903,8 @@ validate_workspace_name() {
   [ "$name" != "cd" ] || die "'cd' is a reserved command name"
   [ "$name" != "rm" ] || die "'rm' is a reserved command name"
   [ "$name" != "fork" ] || die "'fork' is a reserved command name"
+  [ "$name" != "update" ] || die "'update' is a reserved command name"
+  [ "$name" != "version" ] || die "'version' is a reserved command name"
   [ "$name" != "local" ] || return 0
 
   case "$name" in
@@ -1135,6 +1450,17 @@ render_wdid() {
 }
 
 case "${1:-}" in
+  --version | version)
+    shift || true
+    [ "$#" -eq 0 ] || die "version does not accept extra arguments"
+    print_version
+    exit 0
+    ;;
+  update)
+    shift
+    asdf_update "$@"
+    exit 0
+    ;;
   --completion)
     shift
     print_completion_script "$@"
@@ -1151,6 +1477,8 @@ case "${1:-}" in
     exit 0
     ;;
 esac
+
+maybe_warn_update_available "$@"
 
 command_name="run"
 current_dir="$(pwd -P)"

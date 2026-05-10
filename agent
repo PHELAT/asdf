@@ -2,7 +2,6 @@
 
 set -euo pipefail
 
-DEFAULT_AGENT="${AGENT_DEFAULT_AGENT:-codex}"
 DEFAULT_WORKSPACE="${AGENT_DEFAULT_WORKSPACE:-local}"
 
 usage() {
@@ -52,6 +51,7 @@ Override the worktree container with:
 
 Other environment overrides:
   AGENT_DEFAULT_AGENT=claude
+    When unset, agent uses codex if installed, otherwise claude.
   AGENT_DEFAULT_WORKSPACE=my-work-space
 EOF
 }
@@ -66,6 +66,31 @@ is_supported_agent() {
     codex | claude) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+resolve_default_agent() {
+  if [ "${AGENT_DEFAULT_AGENT+x}" = "x" ]; then
+    [ -n "$AGENT_DEFAULT_AGENT" ] ||
+      die "AGENT_DEFAULT_AGENT is set but empty; expected one of: codex, claude"
+
+    is_supported_agent "$AGENT_DEFAULT_AGENT" ||
+      die "unsupported default agent '$AGENT_DEFAULT_AGENT'"
+
+    printf '%s\n' "$AGENT_DEFAULT_AGENT"
+    return
+  fi
+
+  if command -v codex >/dev/null 2>&1; then
+    printf 'codex\n'
+    return
+  fi
+
+  if command -v claude >/dev/null 2>&1; then
+    printf 'claude\n'
+    return
+  fi
+
+  die "could not choose a default agent: neither 'codex' nor 'claude' was found in PATH; install one or set AGENT_DEFAULT_AGENT to codex or claude"
 }
 
 parse_agent_args() {
@@ -84,13 +109,12 @@ parse_args() {
   local saw_agent=0
 
   command_name="run"
-  agent_name="$DEFAULT_AGENT"
+  agent_name=""
   workspace_name="$DEFAULT_WORKSPACE"
   agent_args=()
 
-  is_supported_agent "$agent_name" || die "unsupported default agent '$agent_name'"
-
   if [ "$#" -eq 0 ]; then
+    agent_name="$(resolve_default_agent)"
     return
   fi
 
@@ -105,6 +129,7 @@ parse_args() {
       ;;
     wdid)
       command_name="wdid"
+      agent_name="$(resolve_default_agent)"
       workspace_name="local"
       shift
       parse_agent_args "$@"
@@ -117,6 +142,7 @@ parse_args() {
     saw_agent=1
     shift
   else
+    agent_name="$(resolve_default_agent)"
     workspace_name="$1"
     shift
   fi

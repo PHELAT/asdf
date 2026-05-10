@@ -1,0 +1,529 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+DEFAULT_AGENT="${AGENT_DEFAULT_AGENT:-codex}"
+DEFAULT_WORKSPACE="${AGENT_DEFAULT_WORKSPACE:-local}"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  agent [agent] [workspace] [-- agent-args...]
+  agent [workspace] [-- agent-args...]
+  agent [agent] [workspace] wdid [-- agent-args...]
+  agent wdid [-- agent-args...]
+  agent list
+  agent help
+
+Examples:
+  agent
+  agent codex
+  agent claude
+  agent codex my-work-space
+  agent codex local
+  agent claude my-work-space -- --dangerously-skip-permissions
+  agent wdid
+  agent codex wdid
+  agent codex my-work-tree wdid
+  agent claude local wdid
+
+Agents:
+  codex
+  claude
+
+Workspaces:
+  local                 Open the agent in the current Git checkout.
+  <name>                Open an existing worktree named <name>, or create one.
+
+Worktree summaries:
+  wdid                  Print .wdid.md from the selected checkout. If it does
+                        not exist, run the selected agent headlessly to create
+                        it, then print it.
+
+  .wdid.md is cached. Once present, wdid prints it without regenerating.
+  Delete .wdid.md and run wdid again to regenerate it.
+
+Run this from anywhere inside a Git repository. New worktrees are created next
+to the repository's primary checkout at:
+  ../<repo-name>-worktrees/<workspace>
+
+Override the worktree container with:
+  AGENT_WORKTREE_DIR=/path/to/worktrees agent codex my-work-space
+
+Other environment overrides:
+  AGENT_DEFAULT_AGENT=claude
+  AGENT_DEFAULT_WORKSPACE=my-work-space
+EOF
+}
+
+die() {
+  printf 'agent: %s\n' "$*" >&2
+  exit 1
+}
+
+is_supported_agent() {
+  case "${1:-}" in
+    codex | claude) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+parse_agent_args() {
+  if [ "$#" -eq 0 ]; then
+    return
+  fi
+
+  [ "$1" = "--" ] ||
+    die "unexpected argument '$1'; use -- before arguments intended for $agent_name"
+
+  shift
+  agent_args=("$@")
+}
+
+parse_args() {
+  local saw_agent=0
+
+  command_name="run"
+  agent_name="$DEFAULT_AGENT"
+  workspace_name="$DEFAULT_WORKSPACE"
+  agent_args=()
+
+  is_supported_agent "$agent_name" || die "unsupported default agent '$agent_name'"
+
+  if [ "$#" -eq 0 ]; then
+    return
+  fi
+
+  case "$1" in
+    help | -h | --help)
+      usage
+      exit 0
+      ;;
+    list | ls)
+      command_name="list"
+      return
+      ;;
+    wdid)
+      command_name="wdid"
+      workspace_name="local"
+      shift
+      parse_agent_args "$@"
+      return
+      ;;
+  esac
+
+  if is_supported_agent "$1"; then
+    agent_name="$1"
+    saw_agent=1
+    shift
+  else
+    workspace_name="$1"
+    shift
+  fi
+
+  if [ "$#" -gt 0 ] && [ "$1" = "wdid" ]; then
+    command_name="wdid"
+    if [ "$saw_agent" -eq 1 ]; then
+      workspace_name="local"
+    fi
+    shift
+    parse_agent_args "$@"
+    return
+  fi
+
+  if [ "$#" -gt 0 ] && [ "$1" != "--" ]; then
+    if [ "$saw_agent" -eq 1 ]; then
+      workspace_name="$1"
+      shift
+
+      if [ "$#" -gt 0 ] && [ "$1" = "wdid" ]; then
+        command_name="wdid"
+        shift
+        parse_agent_args "$@"
+        return
+      fi
+    else
+      die "unexpected argument '$1'; use -- before arguments intended for $agent_name"
+    fi
+  fi
+
+  parse_agent_args "$@"
+}
+
+find_existing_worktree() {
+  local name="$1"
+
+  git -C "$REPO_ROOT" worktree list --porcelain |
+    awk -v name="$name" '
+      function basename(path, parts, count) {
+        count = split(path, parts, "/")
+        return parts[count]
+      }
+
+      function branchname(ref) {
+        sub(/^refs\/heads\//, "", ref)
+        return ref
+      }
+
+      function flush() {
+        if (path == "") {
+          return
+        }
+
+        if (basename(path) == name || branchname(branch) == name) {
+          print path
+          found = 1
+          exit
+        }
+      }
+
+      /^worktree / {
+        flush()
+        path = substr($0, 10)
+        branch = ""
+        next
+      }
+
+      /^branch / {
+        branch = substr($0, 8)
+        next
+      }
+
+      END {
+        if (!found) {
+          flush()
+        }
+      }
+    '
+}
+
+validate_workspace_name() {
+  local name="$1"
+
+  [ -n "$name" ] || die "workspace name cannot be empty"
+  [ "$name" != "wdid" ] || die "'wdid' is a reserved command name"
+  [ "$name" != "local" ] || return 0
+
+  case "$name" in
+    -*)
+      die "workspace '$name' cannot start with '-'"
+      ;;
+    */* | *..* | *[[:space:]]*)
+      die "workspace '$name' must be a simple branch/path name without slashes, '..', or spaces"
+      ;;
+  esac
+
+  git -C "$REPO_ROOT" check-ref-format --branch "$name" >/dev/null 2>&1 ||
+    die "workspace '$name' is not a valid git branch name"
+}
+
+copy_env_files() {
+  local target="$1"
+  local count=0
+  local env_file rel_path dest_path dest_dir
+  local -a find_args prune_args
+
+  prune_args=(
+    -name ".git"
+    -o -name "node_modules"
+    -o -name ".next"
+    -o -name ".turbo"
+    -o -name ".vercel"
+    -o -name ".expo"
+    -o -name "dist"
+    -o -name "build"
+  )
+
+  case "$WORKTREE_ROOT" in
+    "$REPO_ROOT"/*)
+      prune_args+=(-o -path "$WORKTREE_ROOT")
+      ;;
+  esac
+
+  find_args=("$REPO_ROOT" "(" -type d "(" "${prune_args[@]}" ")" ")" -prune -o -type f -name ".env*" -print0)
+
+  while IFS= read -r -d '' env_file; do
+    rel_path="${env_file#"$REPO_ROOT"/}"
+    dest_path="$target/$rel_path"
+    dest_dir="$(dirname "$dest_path")"
+
+    mkdir -p "$dest_dir"
+    cp -p "$env_file" "$dest_path"
+    count=$((count + 1))
+  done < <(find "${find_args[@]}")
+
+  printf 'agent: copied %d .env file(s) into %s\n' "$count" "$target" >&2
+}
+
+create_worktree() {
+  local name="$1"
+  local target="$2"
+
+  mkdir -p "$WORKTREE_ROOT"
+
+  [ ! -e "$target" ] ||
+    die "target '$target' already exists but is not registered as a git worktree"
+
+  if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$name"; then
+    printf 'agent: creating worktree %s from existing branch %s\n' "$target" "$name" >&2
+    git -C "$REPO_ROOT" worktree add "$target" "$name" >&2
+  else
+    printf 'agent: creating worktree %s with new branch %s\n' "$target" "$name" >&2
+    git -C "$REPO_ROOT" worktree add -b "$name" "$target" HEAD >&2
+  fi
+
+  copy_env_files "$target"
+}
+
+workspace_path() {
+  local name="$1"
+  local existing target
+
+  validate_workspace_name "$name"
+
+  if [ "$name" = "local" ]; then
+    printf '%s\n' "$REPO_ROOT"
+    return
+  fi
+
+  existing="$(find_existing_worktree "$name")"
+  if [ -n "$existing" ]; then
+    printf 'agent: using existing worktree %s\n' "$existing" >&2
+    printf '%s\n' "$existing"
+    return
+  fi
+
+  target="$WORKTREE_ROOT/$name"
+  create_worktree "$name" "$target"
+  printf '%s\n' "$target"
+}
+
+list_worktrees() {
+  git -C "$REPO_ROOT" worktree list
+}
+
+run_agent() {
+  local bin="$1"
+  local target="$2"
+
+  command -v "$bin" >/dev/null 2>&1 || die "'$bin' command was not found in PATH"
+
+  printf 'agent: opening %s in %s\n' "$bin" "$target" >&2
+  cd "$target" || exit 1
+  if [ "${#agent_args[@]}" -gt 0 ]; then
+    exec "$bin" "${agent_args[@]}"
+  else
+    exec "$bin"
+  fi
+}
+
+wdid_prompt() {
+  cat <<'EOF'
+You are generating a worktree handoff summary.
+
+Create a file named .wdid.md at the repository root. Do not modify any other file.
+
+Goal: summarize what was done in this checkout/worktree so a developer returning later can quickly regain context.
+
+Inspect the repository using read-only commands and file reads. Prefer:
+- git status --short
+- git status --branch --short
+- git diff --stat
+- git diff
+- git diff --staged --stat
+- git diff --staged
+- git log --oneline --decorate --max-count=30
+- branch/upstream/base comparisons when available
+
+Do not run installs, builds, tests, or network calls unless absolutely necessary.
+
+The .wdid.md file should be markdown with these sections:
+# What Did I Do
+
+## Snapshot
+- Repository/worktree path
+- Current branch
+- Current HEAD
+- Whether there are uncommitted changes
+
+## Implementation Summary
+- Bullet summary of the main work completed in this checkout
+- Mention important files/modules only when helpful
+
+## Git Changes
+- Summarize unstaged, staged, and untracked changes
+- Summarize commits unique to this branch when detectable
+
+## How To Continue
+- Concrete next steps a developer should take
+- Mention obvious validation commands only if they are evident from the repo
+
+Keep the file useful and scannable. Do not invent facts. If evidence is unclear, say so.
+EOF
+}
+
+print_wdid_output_snippet() {
+  local output_log="$1"
+
+  printf 'agent: captured output: %s\n' "$output_log" >&2
+
+  if [ -s "$output_log" ]; then
+    printf 'agent: last 40 lines of captured output:\n' >&2
+    tail -n 40 "$output_log" >&2 || true
+  else
+    printf 'agent: captured output was empty\n' >&2
+  fi
+}
+
+validate_generated_wdid() {
+  local wdid_file="$1"
+  local output_log="$2"
+
+  if [ ! -f "$wdid_file" ]; then
+    printf 'agent: .wdid.md was not created at %s\n' "$wdid_file" >&2
+    print_wdid_output_snippet "$output_log"
+    exit 1
+  fi
+
+  if [ ! -s "$wdid_file" ]; then
+    printf 'agent: .wdid.md was created but is empty at %s\n' "$wdid_file" >&2
+    print_wdid_output_snippet "$output_log"
+    exit 1
+  fi
+}
+
+run_codex_wdid() {
+  local target="$1"
+  local prompt="$2"
+
+  if [ "${#agent_args[@]}" -gt 0 ]; then
+    codex exec -C "$target" -s workspace-write "${agent_args[@]}" "$prompt" </dev/null
+  else
+    codex exec -C "$target" -s workspace-write "$prompt" </dev/null
+  fi
+}
+
+run_claude_wdid() {
+  local target="$1"
+  local prompt="$2"
+
+  if [ "${#agent_args[@]}" -gt 0 ]; then
+    (cd "$target" && claude --print --permission-mode acceptEdits "${agent_args[@]}" "$prompt") </dev/null
+  else
+    (cd "$target" && claude --print --permission-mode acceptEdits "$prompt") </dev/null
+  fi
+}
+
+generate_wdid() {
+  local selected_agent="$1"
+  local target="$2"
+  local wdid_file="$3"
+  local output_log prompt tmp_root
+
+  command -v "$selected_agent" >/dev/null 2>&1 ||
+    die "'$selected_agent' command was not found in PATH"
+
+  tmp_root="${TMPDIR:-/tmp}"
+  tmp_root="${tmp_root%/}"
+  output_log="$(mktemp "$tmp_root/agent-wdid.XXXXXX")" ||
+    die "could not create temporary log file"
+  prompt="$(wdid_prompt)"
+
+  printf 'agent: generating .wdid.md with %s in %s\n' "$selected_agent" "$target" >&2
+
+  case "$selected_agent" in
+    codex)
+      if ! run_codex_wdid "$target" "$prompt" >"$output_log" 2>&1; then
+        printf 'agent: codex failed while generating .wdid.md\n' >&2
+        print_wdid_output_snippet "$output_log"
+        exit 1
+      fi
+      ;;
+    claude)
+      if ! run_claude_wdid "$target" "$prompt" >"$output_log" 2>&1; then
+        printf 'agent: claude failed while generating .wdid.md\n' >&2
+        print_wdid_output_snippet "$output_log"
+        exit 1
+      fi
+      ;;
+    *)
+      die "unsupported agent '$selected_agent'"
+      ;;
+  esac
+
+  validate_generated_wdid "$wdid_file" "$output_log"
+}
+
+render_wdid() {
+  local wdid_file="$1"
+
+  if [ ! -t 1 ]; then
+    cat "$wdid_file"
+    return
+  fi
+
+  if command -v glow >/dev/null 2>&1; then
+    glow -p "$wdid_file"
+  elif command -v mdcat >/dev/null 2>&1; then
+    mdcat "$wdid_file"
+  elif command -v bat >/dev/null 2>&1; then
+    bat --language markdown --style=plain --paging=always "$wdid_file"
+  elif command -v less >/dev/null 2>&1; then
+    less -R "$wdid_file"
+  else
+    cat "$wdid_file"
+  fi
+}
+
+command_name="run"
+current_dir="$(pwd -P)"
+REPO_ROOT="$(git -C "$current_dir" rev-parse --show-toplevel 2>/dev/null)" ||
+  die "run agent from inside a git repository"
+GIT_COMMON_DIR="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ||
+  die "could not resolve git common directory for $REPO_ROOT"
+
+case "$(basename "$GIT_COMMON_DIR")" in
+  .git) PRIMARY_REPO_ROOT="$(dirname "$GIT_COMMON_DIR")" ;;
+  *) PRIMARY_REPO_ROOT="$REPO_ROOT" ;;
+esac
+
+repo_parent="$(dirname "$PRIMARY_REPO_ROOT")"
+repo_name="$(basename "$PRIMARY_REPO_ROOT")"
+
+if [ -n "${AGENT_WORKTREE_DIR:-}" ]; then
+  case "$AGENT_WORKTREE_DIR" in
+    /*) WORKTREE_ROOT="$AGENT_WORKTREE_DIR" ;;
+    *) WORKTREE_ROOT="$REPO_ROOT/$AGENT_WORKTREE_DIR" ;;
+  esac
+else
+  WORKTREE_ROOT="$repo_parent/${repo_name}-worktrees"
+fi
+
+parse_args "$@"
+
+case "$command_name" in
+  list)
+    list_worktrees
+    ;;
+  run)
+    target_dir="$(workspace_path "$workspace_name")"
+    run_agent "$agent_name" "$target_dir"
+    ;;
+  wdid)
+    target_dir="$(workspace_path "$workspace_name")"
+    wdid_file="$target_dir/.wdid.md"
+
+    if [ -e "$wdid_file" ]; then
+      [ -f "$wdid_file" ] ||
+        die "$wdid_file exists but is not a regular file"
+      render_wdid "$wdid_file"
+      exit 0
+    fi
+
+    generate_wdid "$agent_name" "$target_dir" "$wdid_file"
+    render_wdid "$wdid_file"
+    ;;
+  *)
+    die "unknown command '$command_name'"
+    ;;
+esac

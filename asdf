@@ -15,6 +15,7 @@ Usage:
   asdf [workspace] cd
   asdf cd
   asdf <workspace> rm
+  asdf <workspace> fork <new-workspace>
   asdf list
   asdf help
 
@@ -33,6 +34,7 @@ Examples:
   asdf codex my-work-tree cd
   asdf my-work-tree cd
   asdf my-work-tree rm
+  asdf my-work-tree fork my-forked-work-tree
 
 Agents:
   codex
@@ -57,6 +59,11 @@ Change directory:
 Remove worktree:
   rm                    Remove the explicitly selected worktree. This requires
                         a named worktree, e.g. asdf my-work-tree rm.
+
+Fork worktree:
+  fork <new-workspace>  Create <new-workspace> as a new branch/worktree from
+                        the selected worktree's current HEAD, including its
+                        uncommitted changes.
 
 Run this from anywhere inside a Git repository. New worktrees are created next
 to the repository's primary checkout at:
@@ -86,7 +93,7 @@ is_supported_agent() {
 
 is_workspace_command() {
   case "${1:-}" in
-    wdid | cd | rm) return 0 ;;
+    wdid | cd | rm | fork) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -148,6 +155,11 @@ parse_workspace_command() {
     rm)
       parse_no_args "$@"
       ;;
+    fork)
+      [ "$#" -eq 1 ] ||
+        die "fork requires a new worktree name: asdf <worktree> fork <new-worktree>"
+      fork_workspace_name="$1"
+      ;;
     *)
       die "unknown command '$command_name'"
       ;;
@@ -161,6 +173,7 @@ parse_args() {
   agent_name=""
   workspace_name="$DEFAULT_WORKSPACE"
   workspace_explicit=0
+  fork_workspace_name=""
   agent_args=()
 
   if [ "$#" -eq 0 ]; then
@@ -194,6 +207,11 @@ parse_args() {
       ;;
     rm)
       die "rm requires an explicit worktree name: asdf <worktree> rm"
+      ;;
+    fork)
+      workspace_name="local"
+      parse_workspace_command "$@"
+      return
       ;;
   esac
 
@@ -289,6 +307,7 @@ validate_workspace_name() {
   [ "$name" != "wdid" ] || die "'wdid' is a reserved command name"
   [ "$name" != "cd" ] || die "'cd' is a reserved command name"
   [ "$name" != "rm" ] || die "'rm' is a reserved command name"
+  [ "$name" != "fork" ] || die "'fork' is a reserved command name"
   [ "$name" != "local" ] || return 0
 
   case "$name" in
@@ -305,7 +324,8 @@ validate_workspace_name() {
 }
 
 copy_env_files() {
-  local target="$1"
+  local source="$1"
+  local target="$2"
   local count=0
   local env_file rel_path dest_path dest_dir
   local -a find_args prune_args
@@ -322,15 +342,15 @@ copy_env_files() {
   )
 
   case "$WORKTREE_ROOT" in
-    "$REPO_ROOT"/*)
+    "$source"/*)
       prune_args+=(-o -path "$WORKTREE_ROOT")
       ;;
   esac
 
-  find_args=("$REPO_ROOT" "(" -type d "(" "${prune_args[@]}" ")" ")" -prune -o -type f -name ".env*" -print0)
+  find_args=("$source" "(" -type d "(" "${prune_args[@]}" ")" ")" -prune -o -type f -name ".env*" -print0)
 
   while IFS= read -r -d '' env_file; do
-    rel_path="${env_file#"$REPO_ROOT"/}"
+    rel_path="${env_file#"$source"/}"
     dest_path="$target/$rel_path"
     dest_dir="$(dirname "$dest_path")"
 
@@ -359,7 +379,7 @@ create_worktree() {
     git -C "$REPO_ROOT" worktree add -b "$name" "$target" HEAD >&2
   fi
 
-  copy_env_files "$target"
+  copy_env_files "$REPO_ROOT" "$target"
 }
 
 workspace_path() {
@@ -385,8 +405,99 @@ workspace_path() {
   printf '%s\n' "$target"
 }
 
+existing_workspace_path() {
+  local name="$1"
+  local existing
+
+  validate_workspace_name "$name"
+
+  if [ "$name" = "local" ]; then
+    printf '%s\n' "$REPO_ROOT"
+    return
+  fi
+
+  existing="$(find_existing_worktree "$name")"
+  [ -n "$existing" ] ||
+    die "worktree '$name' was not found"
+
+  printf '%s\n' "$existing"
+}
+
 list_worktrees() {
   git -C "$REPO_ROOT" worktree list
+}
+
+ensure_forkable_worktree() {
+  local source="$1"
+  local source_name="$2"
+
+  [ -z "$(git -C "$source" ls-files -u)" ] ||
+    die "cannot fork worktree '$source_name' with unresolved merge conflicts"
+}
+
+copy_uncommitted_changes() {
+  local source="$1"
+  local target="$2"
+  local rel_path dest_path dest_dir
+  local untracked_count=0
+
+  if ! git -C "$source" diff --cached --quiet --no-ext-diff; then
+    printf 'asdf: copying staged changes into %s\n' "$target" >&2
+    git -C "$source" diff --cached --binary --no-ext-diff |
+      git -C "$target" apply --index --whitespace=nowarn
+  fi
+
+  if ! git -C "$source" diff --quiet --no-ext-diff; then
+    printf 'asdf: copying unstaged changes into %s\n' "$target" >&2
+    git -C "$source" diff --binary --no-ext-diff |
+      git -C "$target" apply --whitespace=nowarn
+  fi
+
+  while IFS= read -r -d '' rel_path; do
+    dest_path="$target/$rel_path"
+    dest_dir="$(dirname "$dest_path")"
+
+    mkdir -p "$dest_dir"
+    cp -p "$source/$rel_path" "$dest_path"
+    untracked_count=$((untracked_count + 1))
+  done < <(git -C "$source" ls-files --others --exclude-standard -z)
+
+  printf 'asdf: copied %d untracked file(s) into %s\n' "$untracked_count" "$target" >&2
+}
+
+fork_worktree() {
+  local source_name="$1"
+  local target_name="$2"
+  local source target existing source_head
+
+  source="$(existing_workspace_path "$source_name")"
+  validate_workspace_name "$target_name"
+
+  [ "$target_name" != "local" ] ||
+    die "cannot fork into local; choose a named worktree"
+
+  existing="$(find_existing_worktree "$target_name")"
+  [ -z "$existing" ] ||
+    die "worktree '$target_name' already exists at $existing"
+
+  [ ! -e "$WORKTREE_ROOT/$target_name" ] ||
+    die "target '$WORKTREE_ROOT/$target_name' already exists but is not registered as a git worktree"
+
+  if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$target_name"; then
+    die "branch '$target_name' already exists"
+  fi
+
+  source_head="$(git -C "$source" rev-parse --verify HEAD 2>/dev/null)" ||
+    die "could not resolve HEAD for worktree '$source_name'"
+  ensure_forkable_worktree "$source" "$source_name"
+
+  mkdir -p "$WORKTREE_ROOT"
+  target="$WORKTREE_ROOT/$target_name"
+
+  printf 'asdf: forking worktree %s into %s with new branch %s\n' "$source" "$target" "$target_name" >&2
+  git -C "$REPO_ROOT" worktree add -b "$target_name" "$target" "$source_head" >&2
+  copy_uncommitted_changes "$source" "$target"
+  copy_env_files "$source" "$target"
 }
 
 remove_worktree() {
@@ -640,6 +751,9 @@ case "$command_name" in
     [ "$workspace_explicit" -eq 1 ] ||
       die "rm requires an explicit worktree name: asdf <worktree> rm"
     remove_worktree "$workspace_name"
+    ;;
+  fork)
+    fork_worktree "$workspace_name" "$fork_workspace_name"
     ;;
   wdid)
     target_dir="$(workspace_path "$workspace_name")"

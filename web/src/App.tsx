@@ -1,9 +1,73 @@
-import { Github, ExternalLink, Copy, Check } from "lucide-react";
-import { useState } from "react";
+import { Github, ExternalLink, Copy, Check, Sun, Moon, Monitor } from "lucide-react";
+import { useState, useEffect } from "react";
+
+type Theme = "system" | "light" | "dark";
+
+function useTheme() {
+  const [theme, setTheme] = useState<Theme>(() => {
+    return (localStorage.getItem("theme") as Theme) ?? "system";
+  });
+
+  useEffect(() => {
+    const root = document.documentElement;
+    const applyDark = (dark: boolean) => {
+      root.classList.toggle("dark", dark);
+    };
+
+    if (theme === "system") {
+      const mq = window.matchMedia("(prefers-color-scheme: dark)");
+      applyDark(mq.matches);
+      const handler = (e: MediaQueryListEvent) => applyDark(e.matches);
+      mq.addEventListener("change", handler);
+      return () => mq.removeEventListener("change", handler);
+    } else {
+      applyDark(theme === "dark");
+    }
+  }, [theme]);
+
+  const setAndSave = (t: Theme) => {
+    localStorage.setItem("theme", t);
+    setTheme(t);
+  };
+
+  return { theme, setTheme: setAndSave };
+}
+
+const THEME_CYCLE: Theme[] = ["system", "light", "dark"];
+
+const THEME_ICON: Record<Theme, React.ReactNode> = {
+  system: <Monitor className="w-4 h-4" />,
+  light: <Sun className="w-4 h-4" />,
+  dark: <Moon className="w-4 h-4" />,
+};
+
+const THEME_LABEL: Record<Theme, string> = {
+  system: "System",
+  light: "Light",
+  dark: "Dark",
+};
 
 export default function App() {
+  const { theme, setTheme } = useTheme();
+
+  const cycleTheme = () => {
+    const next = THEME_CYCLE[(THEME_CYCLE.indexOf(theme) + 1) % THEME_CYCLE.length];
+    setTheme(next);
+  };
+
   return (
     <div className="min-h-screen bg-background text-foreground">
+
+      {/* ── Floating theme toggle ── */}
+      <button
+        onClick={cycleTheme}
+        title={`Theme: ${THEME_LABEL[theme]}`}
+        className="fixed top-4 right-4 z-50 flex items-center gap-1.5 rounded-full border border-border bg-background px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors cursor-pointer select-none"
+      >
+        {THEME_ICON[theme]}
+        <span>{THEME_LABEL[theme]}</span>
+      </button>
+
       <main className="max-w-[680px] mx-auto px-6 py-16 sm:py-24">
 
         {/* ── Header ── */}

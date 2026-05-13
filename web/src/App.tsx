@@ -146,7 +146,7 @@ export default function App() {
                 {[
                   ["asdf [agent] [workspace]", "Run a coding agent in a workspace"],
                   ["asdf [workspace] cd", "Shell into a workspace"],
-                  ["asdf [workspace] rm", "Remove a workspace"],
+                  ["asdf [workspace] rm [--force]", "Remove a workspace; --force discards changes"],
                   ["asdf [workspace] fork <new>", "Fork a workspace with uncommitted changes"],
                   ["asdf list", "List worktrees with summaries"],
                   ["asdf wdid", "Show or generate .wdid.md for a workspace"],

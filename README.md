@@ -21,6 +21,7 @@ asdf my-feature                 # default agent in "my-feature"
 asdf my-feature cd              # shell into the worktree
 asdf my-feature fork my-v2      # fork with uncommitted changes
 asdf my-feature rm              # remove the worktree
+asdf my-feature rm --force      # discard changes and remove the worktree
 asdf my-feature wdid            # show/generate handoff summary
 asdf list                       # list worktrees with dates and summaries
 asdf update                     # self-update
@@ -49,17 +50,17 @@ Override the location with `ASDF_WORKTREE_DIR`.
 
 ## Commands
 
-| Command      | Description                                                                                                                                  |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| _(default)_  | Select a checkout and exec the agent.                                                                                                        |
-| `wdid`       | Print the worktree's `.wdid.md` handoff summary (“What Did I Do”). Generates one via the agent if missing.                                   |
-| `cd`         | Open an interactive shell in the selected checkout.                                                                                          |
-| `rm`         | Remove a named worktree. The local, primary, and current checkouts are protected.                                                            |
-| `fork <new>` | Create a new worktree from the current HEAD, copying staged, unstaged, and untracked files. Refuses to fork with unresolved merge conflicts. |
-| `list`       | List worktrees newest-first with creation dates and summaries.                                                                               |
-| `update`     | Self-update from the upstream repository.                                                                                                    |
-| `version`    | Print version.                                                                                                                               |
-| `help`       | Print usage.                                                                                                                                 |
+| Command        | Description                                                                                                                                  |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| _(default)_    | Select a checkout and exec the agent.                                                                                                        |
+| `wdid`         | Print the worktree's `.wdid.md` handoff summary (“What Did I Do”). Generates one via the agent if missing.                                   |
+| `cd`           | Open an interactive shell in the selected checkout.                                                                                          |
+| `rm [--force]` | Remove a named worktree. Use `--force` to discard modified or untracked files. The local, primary, and current checkouts are protected.      |
+| `fork <new>`   | Create a new worktree from the current HEAD, copying staged, unstaged, and untracked files. Refuses to fork with unresolved merge conflicts. |
+| `list`         | List worktrees newest-first with creation dates and summaries.                                                                               |
+| `update`       | Self-update from the upstream repository.                                                                                                    |
+| `version`      | Print version.                                                                                                                               |
+| `help`         | Print usage.                                                                                                                                 |
 
 When stdout is a terminal, `wdid` and `list` render Markdown with `glow`, `mdcat`, `bat`, or `less` (first found), falling back to plain text.
 

@@ -23,7 +23,7 @@ Usage:
   asdf [agent] [workspace] cd
   asdf [workspace] cd
   asdf cd
-  asdf <workspace> rm
+  asdf <workspace> rm [--force]
   asdf <workspace> fork <new-workspace>
   asdf list
   asdf update
@@ -48,6 +48,7 @@ Examples:
   asdf codex my-work-tree cd
   asdf my-work-tree cd
   asdf my-work-tree rm
+  asdf my-work-tree rm --force
   asdf my-work-tree fork my-forked-work-tree
   asdf update
   asdf --version
@@ -89,6 +90,7 @@ Change directory:
 Remove worktree:
   rm                    Remove the explicitly selected worktree. This requires
                         a named worktree, e.g. asdf my-work-tree rm.
+                        Use --force to discard modified or untracked files.
 
 Fork worktree:
   fork <new-workspace>  Create <new-workspace> as a new branch/worktree from
@@ -601,7 +603,10 @@ complete_asdf_words() {
           wdid)
             emit_matching_candidates "$cur" --
             ;;
-          cd | rm | fork)
+          rm)
+            emit_matching_candidates "$cur" --force -f
+            ;;
+          cd | fork)
             ;;
           *)
             complete_after_workspace "$cur"
@@ -610,9 +615,14 @@ complete_asdf_words() {
         return
         ;;
       4)
-        if [ "$third" = "wdid" ]; then
-          emit_matching_candidates "$cur" --
-        fi
+        case "$third" in
+          wdid)
+            emit_matching_candidates "$cur" --
+            ;;
+          rm)
+            emit_matching_candidates "$cur" --force -f
+            ;;
+        esac
         return
         ;;
       *)
@@ -626,9 +636,14 @@ complete_asdf_words() {
       complete_after_workspace "$cur"
       ;;
     3)
-      if [ "$second" = "wdid" ]; then
-        emit_matching_candidates "$cur" --
-      fi
+      case "$second" in
+        wdid)
+          emit_matching_candidates "$cur" --
+          ;;
+        rm)
+          emit_matching_candidates "$cur" --force -f
+          ;;
+      esac
       ;;
   esac
 }
@@ -736,6 +751,26 @@ parse_no_args() {
     die "'$command_name' does not accept extra arguments"
 }
 
+parse_rm_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --force | -f)
+        rm_force=1
+        ;;
+      --)
+        shift
+        [ "$#" -gt 0 ] ||
+          die "rm does not accept bare --; use --force to remove a dirty worktree"
+        continue
+        ;;
+      *)
+        die "unknown rm option '$1'; use --force to remove a dirty worktree"
+        ;;
+    esac
+    shift
+  done
+}
+
 parse_workspace_command() {
   command_name="$1"
   shift
@@ -749,7 +784,7 @@ parse_workspace_command() {
       parse_no_args "$@"
       ;;
     rm)
-      parse_no_args "$@"
+      parse_rm_args "$@"
       ;;
     fork)
       [ "$#" -eq 1 ] ||
@@ -770,6 +805,7 @@ parse_args() {
   workspace_name="$DEFAULT_WORKSPACE"
   workspace_explicit=0
   fork_workspace_name=""
+  rm_force=0
   agent_args=()
 
   if [ "$#" -eq 0 ]; then
@@ -1364,7 +1400,9 @@ fork_worktree() {
 
 remove_worktree() {
   local name="$1"
+  local force="${2:-0}"
   local existing
+  local -a remove_args
 
   validate_workspace_name "$name"
 
@@ -1382,7 +1420,12 @@ remove_worktree() {
     die "refusing to remove the current checkout; run this from another checkout"
 
   printf 'asdf: removing worktree %s\n' "$existing" >&2
-  git -C "$REPO_ROOT" worktree remove "$existing"
+  remove_args=(worktree remove)
+  if [ "$force" -eq 1 ]; then
+    remove_args+=(--force)
+  fi
+  remove_args+=("$existing")
+  git -C "$REPO_ROOT" "${remove_args[@]}"
 }
 
 run_agent() {
@@ -1654,7 +1697,7 @@ case "$command_name" in
   rm)
     [ "$workspace_explicit" -eq 1 ] ||
       die "rm requires an explicit worktree name: asdf <worktree> rm"
-    remove_worktree "$workspace_name"
+    remove_worktree "$workspace_name" "$rm_force"
     ;;
   fork)
     fork_worktree "$workspace_name" "$fork_workspace_name"

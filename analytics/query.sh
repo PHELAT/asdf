@@ -9,6 +9,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 ENV_FILE="$REPO_ROOT/.env"
 DATASET="${ASDF_ANALYTICS_DATASET:-asdf_events}"
+BREW_FORMULA="${ASDF_HOMEBREW_FORMULA:-phelat/tap/asdf}"
+BREW_ANALYTICS_BASE_URL="${ASDF_HOMEBREW_ANALYTICS_BASE_URL:-https://formulae.brew.sh/api/analytics}"
 
 usage() {
   cat <<'EOF'
@@ -20,6 +22,10 @@ Usage:
   analytics/query.sh version <version>
   analytics/query.sh platforms [24h|7d|30d|90d|all]
   analytics/query.sh failures [24h|7d|30d|90d|all]
+  analytics/query.sh brew [30d|90d|365d]
+  analytics/query.sh brew-requests [30d|90d|365d]
+  analytics/query.sh brew-installs [30d|90d|365d]
+  analytics/query.sh brew-errors [30d|90d|365d]
 
 Reads Cloudflare credentials from the repo-root .env file:
   CLOUDFLARE_ACCOUNT_ID=...
@@ -27,6 +33,10 @@ Reads Cloudflare credentials from the repo-root .env file:
 
 Optional .env override:
   ASDF_ANALYTICS_DATASET=asdf_events
+
+Homebrew analytics commands use the public formulae.brew.sh API and do not
+need Cloudflare credentials. They require jq and default to:
+  ASDF_HOMEBREW_FORMULA=phelat/tap/asdf
 
 Examples:
   analytics/query.sh dashboard
@@ -37,6 +47,10 @@ Examples:
   analytics/query.sh version 2026051001
   analytics/query.sh platforms 7d
   analytics/query.sh failures all
+  analytics/query.sh brew
+  analytics/query.sh brew-requests 90d
+  analytics/query.sh brew-installs 365d
+  analytics/query.sh brew-errors 30d
 
 Note:
   Version commands report observed install/update events by version. They do
@@ -160,6 +174,20 @@ window_condition() {
     90d) printf "timestamp > NOW() - INTERVAL '90' DAY" ;;
     all) printf "1 = 1" ;;
     *) die "window must be one of: 24h, 7d, 30d, 90d, all" ;;
+  esac
+}
+
+brew_window() {
+  case "${1:-30d}" in
+    30d | 90d | 365d) printf '%s' "${1:-30d}" ;;
+    *) die "Homebrew analytics window must be one of: 30d, 90d, 365d" ;;
+  esac
+}
+
+brew_category() {
+  case "$1" in
+    install | install-on-request | build-error) printf '%s' "$1" ;;
+    *) die "Homebrew analytics category must be one of: install, install-on-request, build-error" ;;
   esac
 }
 
@@ -347,6 +375,61 @@ query_dashboard() {
   query_platforms 30d
 }
 
+query_brew_category() {
+  local category window url response
+
+  category="$(brew_category "$1")"
+  window="$(brew_window "${2:-30d}")"
+  url="$BREW_ANALYTICS_BASE_URL/$category/$window.json"
+
+  command -v jq >/dev/null 2>&1 ||
+    die "jq is required for Homebrew analytics queries"
+
+  response="$(curl -fsSL "$url")"
+
+  printf '%s' "$response" |
+    jq \
+      --arg formula "$BREW_FORMULA" \
+      --arg window "$window" \
+      --arg url "$url" \
+      '
+      . as $root
+      | ([.items[]? | select(.formula == $formula)] | .[0]) as $item
+      | {
+          source: "homebrew",
+          category: $root.category,
+          window: $window,
+          formula: $formula,
+          found: ($item != null),
+          start_date: $root.start_date,
+          end_date: $root.end_date,
+          total_count: $root.total_count,
+          api_url: $url,
+          item: ($item // {
+            number: null,
+            formula: $formula,
+            count: "0",
+            percent: "0"
+          })
+        }
+      '
+}
+
+query_brew_dashboard() {
+  local window="${1:-30d}"
+
+  window="$(brew_window "$window")"
+
+  print_section "Homebrew explicit installs - $window"
+  query_brew_category install-on-request "$window"
+
+  print_section "Homebrew installs - $window"
+  query_brew_category install "$window"
+
+  print_section "Homebrew build errors - $window"
+  query_brew_category build-error "$window"
+}
+
 require_no_args() {
   local command="$1"
   shift
@@ -381,7 +464,35 @@ main() {
   command -v curl >/dev/null 2>&1 ||
     die "curl is required"
 
-  load_env
+  case "$command" in
+    brew | homebrew)
+      shift
+      require_max_one_arg "$command" "$@"
+      query_brew_dashboard "${1:-30d}"
+      exit 0
+      ;;
+    brew-requests | homebrew-requests)
+      shift
+      require_max_one_arg "$command" "$@"
+      query_brew_category install-on-request "${1:-30d}"
+      exit 0
+      ;;
+    brew-installs | homebrew-installs)
+      shift
+      require_max_one_arg "$command" "$@"
+      query_brew_category install "${1:-30d}"
+      exit 0
+      ;;
+    brew-errors | homebrew-errors)
+      shift
+      require_max_one_arg "$command" "$@"
+      query_brew_category build-error "${1:-30d}"
+      exit 0
+      ;;
+    *)
+      load_env
+      ;;
+  esac
 
   case "$command" in
     dashboard)

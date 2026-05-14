@@ -4,6 +4,20 @@ A small bash wrapper for running coding agents (`codex`, `claude`) across git wo
 
 ## Install
 
+### Homebrew
+
+```sh
+brew install phelat/tap/asdf
+```
+
+When installed with Homebrew, upgrade with:
+
+```sh
+brew upgrade phelat/tap/asdf
+```
+
+### Manual install
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/PHELAT/asdf/main/install.sh | sh
 ```

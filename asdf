@@ -13,6 +13,7 @@ ASDF_REMOTE_BASE_URL="${ASDF_REMOTE_BASE_URL_OVERRIDE:-$ASDF_REMOTE_BASE_URL}"
 ASDF_ANALYTICS_URL_OVERRIDE="${ASDF_ANALYTICS_URL:-}"
 ASDF_ANALYTICS_URL="https://asdf-analytics.phelat.workers.dev/event"
 ASDF_ANALYTICS_URL="${ASDF_ANALYTICS_URL_OVERRIDE:-$ASDF_ANALYTICS_URL}"
+ASDF_INSTALL_SOURCE="${ASDF_INSTALL_SOURCE:-manual}"
 
 DEFAULT_WORKSPACE="${ASDF_DEFAULT_WORKSPACE:-local}"
 
@@ -298,6 +299,20 @@ analytics_conflict_fallback_for_name() {
   fi
 }
 
+package_manager_update_message() {
+  case "$ASDF_INSTALL_SOURCE" in
+    manual | "")
+      return 1
+      ;;
+    homebrew)
+      printf 'installed by Homebrew; run: brew upgrade phelat/tap/asdf\n'
+      ;;
+    *)
+      printf 'installed by a package manager; use that package manager to upgrade asdf\n'
+      ;;
+  esac
+}
+
 update_failure() {
   local install_name="$1"
   local message="$2"
@@ -310,9 +325,13 @@ update_failure() {
 
 asdf_update() {
   local install_path install_name install_dir conflict_fallback
-  local remote_version tmp_file mode
+  local remote_version tmp_file mode update_message
 
   [ "$#" -eq 0 ] || die "update does not accept extra arguments"
+
+  if update_message="$(package_manager_update_message)"; then
+    die "$update_message"
+  fi
 
   install_path="$(current_executable_path)" ||
     update_failure "asdf" "could not resolve current executable path"
@@ -378,6 +397,9 @@ maybe_warn_update_available() {
   local cache_base cache_dir cache_file now last age remote_version
 
   [ "${ASDF_UPDATE_CHECK:-1}" != "0" ] || return 0
+  if package_manager_update_message >/dev/null; then
+    return 0
+  fi
   [ -t 2 ] || return 0
 
   case "${1:-}" in

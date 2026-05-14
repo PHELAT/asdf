@@ -1,3 +1,8 @@
+/*
+ * Copyright 2026 Mahdi Nouri
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 const ALLOWED_EVENTS = new Set(["install", "update_success", "update_failed"]);
 const MAX_BODY_BYTES = 2048;
 const ANALYTICS_BINDING = "ASDF_ANALYTICS";

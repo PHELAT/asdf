@@ -1,3 +1,6 @@
+# Copyright 2026 Mahdi Nouri
+# SPDX-License-Identifier: Apache-2.0
+
 name = "asdf-analytics"
 main = "worker.js"
 compatibility_date = "2026-05-10"

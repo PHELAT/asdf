@@ -32,6 +32,7 @@ The installer places `asdf` in `${ASDF_INSTALL_DIR:-$HOME/.local/bin}` and sets 
 asdf                            # default agent in local checkout
 asdf claude my-feature          # claude in worktree "my-feature"
 asdf my-feature                 # default agent in "my-feature"
+asdf remote-feature pull        # fetch remote branch if needed, then open agent
 asdf my-feature cd              # shell into the worktree
 asdf my-feature fork my-v2      # fork with uncommitted changes
 asdf my-feature rm              # remove the worktree
@@ -67,6 +68,7 @@ Override the location with `ASDF_WORKTREE_DIR`.
 | Command        | Description                                                                                                                                  |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | _(default)_    | Select a checkout and exec the agent.                                                                                                        |
+| `pull`         | For a named workspace, fetch a matching remote branch if no local branch/worktree exists, then open the selected agent.                      |
 | `wdid`         | Print the worktree's `.wdid.md` handoff summary (“What Did I Do”). Generates one via the agent if missing.                                   |
 | `cd`           | Open an interactive shell in the selected checkout.                                                                                          |
 | `rm [--force]` | Remove a named worktree. Use `--force` to discard modified or untracked files. The local, primary, and current checkouts are protected.      |
@@ -91,6 +93,17 @@ eval "$(asdf --completion bash)"
 ```
 
 Completes workspace names, agents, and commands.
+
+## Pulling remote branches
+
+Use `pull` when the branch exists on a remote but not yet on your machine:
+
+```sh
+asdf branch-not-on-my-machine pull
+asdf claude branch-not-on-my-machine pull -- --dangerously-skip-permissions
+```
+
+If a worktree or local branch with that name already exists, `asdf` skips fetching from the remote. Otherwise it fetches a matching branch from `origin` when available, or from the only configured remote, creates a local tracking branch and worktree, runs `jkl` if present, then opens the selected/default agent.
 
 ## jkl — Just Kickstart Locally ;)
 

@@ -145,6 +145,7 @@ export default function App() {
               <tbody className="divide-y divide-border">
                 {[
                   ["asdf [agent] [workspace]", "Run a coding agent in a workspace"],
+                  ["asdf [workspace] pull", "Fetch a remote branch if needed, then open an agent"],
                   ["asdf [workspace] cd", "Shell into a workspace"],
                   ["asdf [workspace] rm [--force]", "Remove a workspace; --force discards changes"],
                   ["asdf [workspace] fork <new>", "Fork a workspace with uncommitted changes"],
@@ -171,6 +172,7 @@ export default function App() {
           <h2 className="text-lg font-semibold text-foreground mb-4">Examples</h2>
           <CodeBlock lang="sh">{`asdf                            # default agent in local checkout
 asdf codex my-feature           # codex in worktree "my-feature"
+asdf remote-feature pull        # fetch remote branch if needed, then open agent
 asdf claude my-feature -- --dangerously-skip-permissions
 asdf my-feature fork my-feature-v2   # fork with uncommitted changes
 asdf list                       # list worktrees with summaries

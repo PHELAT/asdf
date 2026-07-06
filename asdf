@@ -22,6 +22,8 @@ usage() {
 Usage:
   asdf [agent] [workspace] [-- agent-args...]
   asdf [workspace] [-- agent-args...]
+  asdf [agent] <workspace> pull [-- agent-args...]
+  asdf <workspace> pull [-- agent-args...]
   asdf [agent] [workspace] wdid [-- agent-args...]
   asdf wdid [-- agent-args...]
   asdf [agent] [workspace] cd
@@ -44,6 +46,7 @@ Examples:
   asdf codex my-work-space
   asdf codex local
   asdf claude my-work-space -- --dangerously-skip-permissions
+  asdf branch-not-on-my-machine pull
   asdf wdid
   asdf codex wdid
   asdf codex my-work-tree wdid
@@ -64,6 +67,9 @@ Agents:
 Workspaces:
   local                 Use the current Git checkout.
   <name>                Use an existing worktree named <name>, or create one.
+  <name> pull           If <name> is not already local, fetch it from a remote
+                        branch before creating the worktree and opening the
+                        selected agent.
 
 Worktree summaries:
   list                  Print worktrees newest first with their creation date.
@@ -95,6 +101,12 @@ Remove worktree:
   rm                    Remove the explicitly selected worktree. This requires
                         a named worktree, e.g. asdf my-work-tree rm.
                         Use --force to discard modified or untracked files.
+
+Pull remote worktree:
+  pull                  For the explicitly selected worktree, use an existing
+                        local worktree/branch when present. Otherwise fetch a
+                        matching remote branch, create a local tracking branch
+                        and worktree, then open the selected agent.
 
 Fork worktree:
   fork <new-workspace>  Create <new-workspace> as a new branch/worktree from
@@ -456,7 +468,7 @@ is_supported_agent() {
 
 is_workspace_command() {
   case "${1:-}" in
-    wdid | cd | rm | fork) return 0 ;;
+    wdid | cd | rm | fork | pull) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -512,6 +524,7 @@ completion_workspace_candidates() {
           name != "cd" &&
           name != "rm" &&
           name != "fork" &&
+          name != "pull" &&
           name != "update" &&
           name != "version" &&
           name !~ /^-/ &&
@@ -571,7 +584,7 @@ complete_workspace_position() {
 complete_after_workspace() {
   local prefix="$1"
 
-  emit_matching_candidates "$prefix" wdid cd rm fork --
+  emit_matching_candidates "$prefix" wdid cd rm fork pull --
 }
 
 complete_asdf_words() {
@@ -631,7 +644,7 @@ complete_asdf_words() {
           rm)
             emit_matching_candidates "$cur" --force -f
             ;;
-          cd | fork)
+          cd | fork | pull)
             ;;
           *)
             complete_after_workspace "$cur"
@@ -641,7 +654,7 @@ complete_asdf_words() {
         ;;
       4)
         case "$third" in
-          wdid)
+          wdid | pull)
             emit_matching_candidates "$cur" --
             ;;
           rm)
@@ -662,7 +675,7 @@ complete_asdf_words() {
       ;;
     3)
       case "$second" in
-        wdid)
+        wdid | pull)
           emit_matching_candidates "$cur" --
           ;;
         rm)
@@ -811,6 +824,10 @@ parse_workspace_command() {
     rm)
       parse_rm_args "$@"
       ;;
+    pull)
+      [ -n "$agent_name" ] || agent_name="$(resolve_default_agent)"
+      parse_agent_args "$@"
+      ;;
     fork)
       [ "$#" -eq 1 ] ||
         die "fork requires a new worktree name: asdf <worktree> fork <new-worktree>"
@@ -864,6 +881,9 @@ parse_args() {
       ;;
     rm)
       die "rm requires an explicit worktree name: asdf <worktree> rm"
+      ;;
+    pull)
+      die "pull requires an explicit worktree name: asdf <worktree> pull"
       ;;
     fork)
       workspace_name="local"
@@ -965,6 +985,7 @@ validate_workspace_name() {
   [ "$name" != "cd" ] || die "'cd' is a reserved command name"
   [ "$name" != "rm" ] || die "'rm' is a reserved command name"
   [ "$name" != "fork" ] || die "'fork' is a reserved command name"
+  [ "$name" != "pull" ] || die "'pull' is a reserved command name"
   [ "$name" != "update" ] || die "'update' is a reserved command name"
   [ "$name" != "version" ] || die "'version' is a reserved command name"
   [ "$name" != "local" ] || return 0
@@ -1036,6 +1057,62 @@ create_worktree() {
   run_jkl "$REPO_ROOT" "$target" "$name"
 }
 
+select_pull_remote() {
+  local remote selected count
+
+  if git -C "$REPO_ROOT" remote get-url origin >/dev/null 2>&1; then
+    printf 'origin\n'
+    return
+  fi
+
+  selected=""
+  count=0
+  while IFS= read -r remote; do
+    [ -n "$remote" ] || continue
+    selected="$remote"
+    count=$((count + 1))
+  done < <(git -C "$REPO_ROOT" remote)
+
+  case "$count" in
+    0)
+      die "cannot pull workspace: no git remotes are configured"
+      ;;
+    1)
+      printf '%s\n' "$selected"
+      ;;
+    *)
+      die "cannot choose a remote to pull from: multiple remotes are configured and none is named origin"
+      ;;
+  esac
+}
+
+create_worktree_from_remote_branch() {
+  local name="$1"
+  local target="$2"
+  local remote remote_ref
+
+  mkdir -p "$WORKTREE_ROOT"
+
+  [ ! -e "$target" ] ||
+    die "target '$target' already exists but is not registered as a git worktree"
+
+  remote="$(select_pull_remote)"
+  remote_ref="$remote/$name"
+
+  printf 'asdf: fetching remote branch %s from %s\n' "$name" "$remote" >&2
+  if ! git -C "$REPO_ROOT" fetch "$remote" "+refs/heads/$name:refs/remotes/$remote/$name" >&2; then
+    die "remote branch '$name' was not found on $remote or could not be fetched"
+  fi
+
+  if ! git -C "$REPO_ROOT" show-ref --verify --quiet "refs/remotes/$remote/$name"; then
+    die "remote branch '$remote_ref' was not found after fetch"
+  fi
+
+  printf 'asdf: creating worktree %s from remote branch %s\n' "$target" "$remote_ref" >&2
+  git -C "$REPO_ROOT" worktree add --track -b "$name" "$target" "$remote_ref" >&2
+  run_jkl "$REPO_ROOT" "$target" "$name"
+}
+
 workspace_path() {
   local name="$1"
   local existing target
@@ -1056,6 +1133,31 @@ workspace_path() {
 
   target="$WORKTREE_ROOT/$name"
   create_worktree "$name" "$target"
+  printf '%s\n' "$target"
+}
+
+pulled_workspace_path() {
+  local name="$1"
+  local existing target
+
+  validate_workspace_name "$name"
+
+  [ "$name" != "local" ] ||
+    die "pull requires a named workspace: asdf <worktree> pull"
+
+  existing="$(find_existing_worktree "$name")"
+  if [ -n "$existing" ]; then
+    printf 'asdf: using existing worktree %s\n' "$existing" >&2
+    printf '%s\n' "$existing"
+    return
+  fi
+
+  target="$WORKTREE_ROOT/$name"
+  if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$name"; then
+    create_worktree "$name" "$target"
+  else
+    create_worktree_from_remote_branch "$name" "$target"
+  fi
   printf '%s\n' "$target"
 }
 
@@ -1713,6 +1815,12 @@ case "$command_name" in
     ;;
   run)
     target_dir="$(workspace_path "$workspace_name")"
+    run_agent "$agent_name" "$target_dir"
+    ;;
+  pull)
+    [ "$workspace_explicit" -eq 1 ] ||
+      die "pull requires an explicit worktree name: asdf <worktree> pull"
+    target_dir="$(pulled_workspace_path "$workspace_name")"
     run_agent "$agent_name" "$target_dir"
     ;;
   cd)
